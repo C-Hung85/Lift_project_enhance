@@ -1,0 +1,18 @@
+# local environment
+.vscode
+.pytest_cache
+
+# folder cache
+__pycache__
+data/*
+
+# temp files type
+*.pkl
+*.log
+*.json
+*.png
+*.pt
+*.csv
+*.tgz
+*.tar
+*.mp4
