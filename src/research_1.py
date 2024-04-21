@@ -15,12 +15,13 @@ path = path_list[0]
 vidcap = cv2.VideoCapture(path)
 
 ret, frame1 = vidcap.read()
-for i in range(12):
-    ret, frame2 = vidcap.read()
+ret, frame2 = vidcap.read()
 
 frame1 = frame1.astype(int)
 frame2 = frame2.astype(int)
 
-frame_diff = cv2.normalize(np.mean(frame2 - frame1, axis=2),  None, 0, 255, cv2.NORM_MINMAX)
+frame_diff = cv2.normalize(np.mean(frame2 - frame1, axis=2),  None, 0, 255, cv2.NORM_MINMAX, dtype=8)
 
-cv2.imwrite("temp/test.png", frame_diff)
+
+cv2.imwrite("temp/frame.png", frame1)
+cv2.imwrite("temp/diff.png", frame_diff)
