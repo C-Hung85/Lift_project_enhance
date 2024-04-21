@@ -29,12 +29,13 @@ while ret:
     if counter % interval == 0:
         frame2 = frame2.astype(int)
         frame_diff_raw = np.mean((frame2 - frame1)**2, axis=2, dtype=int)
-        Z = np.zeros_like(frame_diff_raw)
-        Z[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)] = frame_diff_raw[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
-        frame_diff = cv2.cvtColor(cv2.normalize(Z,  None, 0, 255, cv2.NORM_MINMAX, dtype=8), cv2.COLOR_GRAY2BGR)
-        out.write(frame_diff)
+        frame_diff_center = np.zeros_like(frame_diff_raw)
+        frame_diff_center[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)] = frame_diff_raw[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
+        # frame_diff = cv2.cvtColor(cv2.normalize(frame_diff_center,  None, 0, 255, cv2.NORM_MINMAX, dtype=8), cv2.COLOR_GRAY2BGR)
+
+        frame_out = frame2.copy()
+        frame_out[frame_diff_center>100] = [0, 255, 0]
+        out.write(frame_out.astype(np.uint8))
         frame1 = frame2.copy()
 
 out.release()
-
-
