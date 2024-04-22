@@ -25,38 +25,22 @@ def job(path):
     out = cv2.VideoWriter(path.replace("data", "result"), fourcc, vidcap.get(cv2.CAP_PROP_FPS)/interval, (w, h))
 
     counter = 0
-    move = False
-    p_count_list = []
-
     while ret:
         ret, frame2 = vidcap.read()
         counter += 1
-        
         if counter % interval == 0:
             frame2 = frame2.astype(int)
             frame_diff_raw = np.mean((frame2 - frame1)**2, axis=2, dtype=int)
             frame_diff_center = np.zeros_like(frame_diff_raw)
             frame_diff_center[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)] = frame_diff_raw[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
+            # frame_diff = cv2.cvtColor(cv2.normalize(frame_diff_center,  None, 0, 255, cv2.NORM_MINMAX, dtype=8), cv2.COLOR_GRAY2BGR)
 
-            frame_out = frame2.astype(np.uint8)
+            frame_out = frame2.copy()
             frame_out[frame_diff_center>120] = [0, 255, 0]
-            p_count = np.count_nonzero(frame_diff_center>120, axis=None)
-            mean_diff_value = np.mean(frame_diff_center[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)])
-            
-            if len(p_count_list) > 10:
-                q1, q3 = np.quantile(p_count_list, 0.25), np.quantile(p_count_list, 0.75)
-                if p_count > q3 + 1.5*(q3-q1):
-                    move = True
-                    cv2.circle(frame_out, (20, h-50), 10, [0, 255, 0], -1)
-                else:
-                    move = False
-                    cv2.circle(frame_out, (20, h-50), 10, [0, 0, 255], -1)
-            p_count_list.append(p_count)
-
-            cv2.putText(frame_out, f"p count: {p_count} | mean value: {mean_diff_value}", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 0], 2)
             out.write(frame_out.astype(np.uint8))
             frame1 = frame2.copy()
 
     out.release()
 
-job("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
+with Pool(5) as pool:
+    pool.map(job, path_list)
