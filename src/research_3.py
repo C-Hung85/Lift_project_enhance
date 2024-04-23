@@ -18,29 +18,57 @@ for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 
 def job(path):
     vidcap = cv2.VideoCapture(path)
     ret, frame1 = vidcap.read()
+    frame_idx = 0
     frame1 = frame1.astype(int)
+    
+    frame_signal_dict = {'signal':[], 'frame_idx':[], 'move_pixel_coord':[]}
     h, w = frame1.shape[:2]
 
+    while ret:
+        ret, frame2 = vidcap.read()
+        frame_idx += 1
+        if frame_idx % interval == 0:
+            frame2 = frame2.astype(int)
+            frame_diff = np.mean((frame2 - frame1)**2, axis=2, dtype=int)[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
+            move_pixel_coord = list(np.where(frame_diff>120))
+            move_pixel_coord[0] += int(h*1/4)
+            move_pixel_coord[1] += int(w*1/4)
+            move_pixel_count = len(move_pixel_coord[0])
+
+            frame_signal_dict['signal'].append(move_pixel_count)
+            frame_signal_dict['frame_idx'].append(frame_idx)
+            frame_signal_dict['move_pixel_coord'].append(move_pixel_coord)
+            frame1 = frame2.copy()
+    
+    q1, q3 = np.quantile(frame_signal_dict['signal'], 0.25), np.quantile(frame_signal_dict['signal'], 0.75)
+    frame_signal_dict['move'] = np.zeros(len(frame_signal_dict['signal']), dtype=bool)
+    frame_signal_dict['move'][np.where(np.array(frame_signal_dict['signal'])>q3+1.5*(q3-q1))] = True
+
+    vidcap = cv2.VideoCapture(path)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(path.replace("data", "result"), fourcc, vidcap.get(cv2.CAP_PROP_FPS)/interval, (w, h))
 
-    counter = 0
-    while ret:
-        ret, frame2 = vidcap.read()
-        counter += 1
-        if counter % interval == 0:
-            frame2 = frame2.astype(int)
-            frame_diff_raw = np.mean((frame2 - frame1)**2, axis=2, dtype=int)
-            frame_diff_center = np.zeros_like(frame_diff_raw)
-            frame_diff_center[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)] = frame_diff_raw[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
-            # frame_diff = cv2.cvtColor(cv2.normalize(frame_diff_center,  None, 0, 255, cv2.NORM_MINMAX, dtype=8), cv2.COLOR_GRAY2BGR)
+    for frame_idx, signal, move, move_pixel_coord in zip(
+        frame_signal_dict['frame_idx'], 
+        frame_signal_dict['signal'], 
+        frame_signal_dict['move'],
+        frame_signal_dict['move_pixel_coord']):
 
-            frame_out = frame2.copy()
-            frame_out[frame_diff_center>120] = [0, 255, 0]
-            out.write(frame_out.astype(np.uint8))
-            frame1 = frame2.copy()
+        vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = vidcap.read()
+
+        frame[tuple(move_pixel_coord)] = [0, 255, 0]
+        if move:
+            cv2.putText(frame, f"pixel count: {signal}", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 0], 2)
+        else:
+            cv2.putText(frame, f"pixel count: {signal}", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 0, 255], 2)
+
+        out.write(frame)
+
 
     out.release()
 
-with Pool(5) as pool:
-    pool.map(job, path_list)
+# with Pool(5) as pool:
+#     pool.map(job, path_list)
+
+job("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
