@@ -54,7 +54,7 @@ def job(path):
 
     q1, q3 = np.quantile(frame_signal_dict['block_signal'], 0.25), np.quantile(frame_signal_dict['block_signal'], 0.75)
     frame_signal_dict['block'] = np.zeros(len(frame_signal_dict['block_signal']), dtype=bool)
-    frame_signal_dict['block'][np.where(np.array(frame_signal_dict['block_signal']) < q1-1.5*(q3-q1))] = True
+    frame_signal_dict['block'][np.where(np.array(frame_signal_dict['block_signal']) < q1-5*(q3-q1))] = True
 
     vidcap = cv2.VideoCapture(path)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -86,6 +86,7 @@ def job(path):
             out.write(frame)
 
     out.release()
+    print(f"complete: {path}")
 
 with Pool(5) as pool:
     pool.map(job, path_list)
