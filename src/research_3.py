@@ -8,6 +8,7 @@ from multiprocessing import Pool
 from config import Config
 
 interval = Config['scan_setting']['interval']
+display = True
 
 path_list = []
 for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 'lifts','data')):
@@ -60,6 +61,12 @@ def job(path):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(path.replace("data", "result"), fourcc, vidcap.get(cv2.CAP_PROP_FPS)/interval, (w, h))
 
+    if display:
+        frame_signal_dict['move_signal'] = np.max(frame_signal_dict['move_signal']) - np.array(frame_signal_dict['move_signal'])
+        frame_signal_dict['block_signal'] = np.max(frame_signal_dict['block_signal']) - np.array(frame_signal_dict['block_signal'])
+        max_move_signal = np.max(frame_signal_dict['move_signal'])
+        max_block_signal = np.max(frame_signal_dict['block_signal'])
+
     for frame_idx, move_signal, move, block_signal, block, move_pixel_coord in zip(
         frame_signal_dict['frame_idx'], 
         frame_signal_dict['move_signal'], 
@@ -67,6 +74,10 @@ def job(path):
         frame_signal_dict['block_signal'],
         frame_signal_dict['block'],
         frame_signal_dict['move_pixel_coord']):
+
+        if display:
+            move_signal_display = round(move_signal/max_move_signal, 3)
+            block_signal_display = round(block_signal/max_block_signal, 3)
 
         vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = vidcap.read()
@@ -76,12 +87,17 @@ def job(path):
 
             if block:
                 color = [0, 255, 255]
+                condition = "blocked"
             else:
                 if move:
                     color = [0, 255, 0]
+                    condition = "moving"
                 else:
                     color = [0, 0, 255]
-            cv2.putText(frame, f"move signal: {move_signal} | block signal: {block_signal}", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                    condition = "static"
+            
+            cv2.putText(frame, f"move signal: {move_signal_display} | block signal: {block_signal_display}", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            cv2.putText(frame, condition, (w-200, h-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
             out.write(frame)
 
