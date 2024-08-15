@@ -38,6 +38,10 @@ def job(path):
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY_INV, 21, 6).astype(bool)
 
+            ''' discrimination logics
+            blocked frames: the count of edge pixels suddently drop
+            moving frames: the count of edge pixels - moving pixel suddently drop
+            '''
             move_pixel_coord = list(np.where(move_pixel))
             block_signal = np.count_nonzero(edge)
             edge[tuple(move_pixel_coord)] = False
