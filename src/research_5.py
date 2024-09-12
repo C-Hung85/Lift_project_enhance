@@ -38,10 +38,10 @@ def job(path):
         frame_idx += 1
         if ret and frame_idx % interval == 0:
             frame2 = frame2.astype(int)
-            frame_diff = np.mean((frame2 - frame1)**2, axis=2, dtype=int)[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)]
+            frame_diff = np.mean((frame2 - frame1)**2, axis=2, dtype=int)[h_roi[0]:h_roi[1], w_roi[0]:w_roi[1]]
             move_pixel = frame_diff > 120
             edge = cv2.adaptiveThreshold(
-                cv2.cvtColor(frame2.astype(np.uint8)[int(h*1/4):int(h*3/4), int(w*1/4):int(w*3/4)], cv2.COLOR_BGR2GRAY), 
+                cv2.cvtColor(frame2.astype(np.uint8)[h_roi[0]:h_roi[1], w_roi[0]:w_roi[1]], cv2.COLOR_BGR2GRAY), 
                 255, 
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY_INV, 21, 6).astype(bool)
@@ -83,7 +83,7 @@ def job(path):
     argmax_array = np.argmax(feature, axis=0).reshape(h_roi[1]-h_roi[0], w_roi[1]-w_roi[0])+1
     filter_array = np.zeros_like(argmax_array, dtype=bool)
     for channel in range(N_DECOMPOSITION):
-        filter_array += feature[channel,:].reshape(h_roi[1]-h_roi[0], w_roi[1]-w_roi[0]) > 0.1
+        filter_array += feature[channel,:].reshape(h_roi[1]-h_roi[0], w_roi[1]-w_roi[0]) > 0
     argmax_array = argmax_array * filter_array
     
 
