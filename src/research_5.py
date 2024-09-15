@@ -60,16 +60,18 @@ def job(path):
             frame_signal_dict['edge'].append(edge)
             frame1 = frame2.copy()
     
+    # (edge pixel - moving pixel) suddenly dropped --> Lift moving
     q1, q3 = np.quantile(frame_signal_dict['move_signal'], 0.25), np.quantile(frame_signal_dict['move_signal'], 0.75)
     frame_signal_dict['move'] = np.zeros(len(frame_signal_dict['move_signal']), dtype=bool)
     frame_signal_dict['move'][np.where(np.array(frame_signal_dict['move_signal']) < q1-1.5*(q3-q1))] = True
 
+    # edge pixel suddenly dropped --> image blocked
     q1, q3 = np.quantile(frame_signal_dict['block_signal'], 0.25), np.quantile(frame_signal_dict['block_signal'], 0.75)
     frame_signal_dict['block'] = np.zeros(len(frame_signal_dict['block_signal']), dtype=bool)
     frame_signal_dict['block'][np.where(np.array(frame_signal_dict['block_signal']) < q1-5*(q3-q1))] = True
 
     frame_signal_dict = pd.DataFrame(frame_signal_dict)
-    moving_frame_signal_dict = frame_signal_dict.loc[(frame_signal_dict['move']) & (frame_signal_dict['block']==False)]
+    moving_frame_signal_dict = frame_signal_dict.loc[(frame_signal_dict['move'])]
 
     move_pixel_array = lil_array((moving_frame_signal_dict.shape[0], (h_roi[1]-h_roi[0])*(w_roi[1]-w_roi[0])), dtype=float)
 
