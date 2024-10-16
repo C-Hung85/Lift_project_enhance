@@ -16,6 +16,8 @@ for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 
         path_list.append(os.path.join(root, file))
 
 
+path = "/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4"
+
 def job(path):
     vidcap = cv2.VideoCapture(path)
     ret, frame1 = vidcap.read()
@@ -98,6 +100,9 @@ def job(path):
                 if move:
                     color = [0, 255, 0]
                     condition = "moving"
+                    center = [int(np.mean([i[0] for i in move_pixel_coord])), int(np.mean([i[1] for i in move_pixel_coord]))]
+                    cv2.line(frame, (center[1]-5, center[0]), (center[1]+5, center[0]), [0, 0, 255], 2)
+                    cv2.line(frame, (center[1], center[0]-5), (center[1], center[0]+5), [0, 0, 255], 2)
                 else:
                     color = [0, 0, 255]
                     condition = "static"
@@ -110,7 +115,7 @@ def job(path):
     out.release()
     print(f"complete: {path}")
 
-with Pool(5) as pool:
-    pool.map(job, path_list)
+# with Pool(5) as pool:
+#     pool.map(job, path_list)
 
-# job("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
+job("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
