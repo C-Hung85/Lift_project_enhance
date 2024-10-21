@@ -81,7 +81,7 @@ def scan(video_path):
                         color=(0, 255, 0), 
                         flags=0)
                     
-                    camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.05
+                    camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.001
 
                     if camera_pan == False:
                         group_idx_array = cluster.fit_predict(paired_keypoints_info_array[:, 2].reshape(-1, 1))
@@ -90,13 +90,13 @@ def scan(video_path):
                             group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
                             group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
-                            group0_v_travel = 0 if ttest_1samp(group0_v_travel_array, 0).pvalue > 0.1 else np.median(group0_v_travel_array)
-                            group1_v_travel = 0 if ttest_1samp(group1_v_travel_array, 0).pvalue > 0.1 else np.median(group1_v_travel_array)
+                            group0_v_travel = 0 if ttest_1samp(group0_v_travel_array, 0).pvalue > 0.005 else np.median(group0_v_travel_array)
+                            group1_v_travel = 0 if ttest_1samp(group1_v_travel_array, 0).pvalue > 0.005 else np.median(group1_v_travel_array)
 
                             if abs(group0_v_travel) > abs(group1_v_travel):
-                                vertical_travel_distance = group1_v_travel - group0_v_travel
+                                vertical_travel_distance = int(group1_v_travel - group0_v_travel)
                             else:
-                                vertical_travel_distance = group0_v_travel - group1_v_travel
+                                vertical_travel_distance = int(group0_v_travel - group1_v_travel)
             
             cv2.putText(
                 frame, 
@@ -104,7 +104,7 @@ def scan(video_path):
                 (10, h-40), 
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 1, 
-                (0, 255, 255) if camera_pan else ((0, 0, 255) if group1_v_travel==0 else (0, 255, 0)), 
+                (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
                 2)
             
             out.write(frame)
@@ -116,9 +116,11 @@ def scan(video_path):
 
 
 path_list = []
-for root, folder, files in os.walk(Config['files']['data_folder']):
+for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 'lifts','data')):
     for file in files:
         path_list.append(os.path.join(root, file))
 
-with Pool(2) as pool:
-    pool.map(scan, path_list)
+# with Pool(2) as pool:
+#     pool.map(scan, path_list)
+
+scan("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
