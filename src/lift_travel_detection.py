@@ -32,7 +32,7 @@ def scan(video_path):
     frame_idx = 0
 
     # create a mask to define the ROI
-    mask = np.zeros((h, w), dtype=np.int8)
+    mask = np.zeros((h, w), dtype=np.uint8)
     mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1
 
     # detect keypoints
@@ -116,7 +116,7 @@ def scan(video_path):
 
 
 path_list = []
-for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 'lifts','data')):
+for root, folder, files in os.walk(Config['files']['data_folder']):
     for file in files:
         path_list.append(os.path.join(root, file))
 
