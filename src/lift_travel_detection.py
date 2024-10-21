@@ -32,8 +32,8 @@ def scan(video_path):
     frame_idx = 0
 
     # create a mask to define the ROI
-    mask = np.zeros((h, w), dtype=bool)
-    mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = True
+    mask = np.zeros((h, w), dtype=np.int8)
+    mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1
 
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = orb.detectAndCompute(frame, mask)
