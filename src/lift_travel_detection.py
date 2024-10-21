@@ -22,7 +22,7 @@ ROI_RATIO = 0.5
 
 # create necessary folders
 for folder_name in ['inspection', 'result']:
-    os.makedirs(folder_name)
+    os.makedirs(folder_name, exist_ok=True)
 
 def scan(video_path):
     vidcap = cv2.VideoCapture(video_path)
