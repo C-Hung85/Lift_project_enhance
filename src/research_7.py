@@ -17,8 +17,8 @@ from config import Config
 
 warnings.filterwarnings('ignore') 
 
-orb = cv2.ORB_create(nfeatures=60)
-bf_matcher = cv2.BFMatcher(normType=cv2.NORM_HAMMING, crossCheck=True)
+orb = cv2.ORB.create(nfeatures=60)
+bf_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
 cluster = KMeans(n_clusters=2)
 interval = Config['scan_setting']['interval']
 display = True
