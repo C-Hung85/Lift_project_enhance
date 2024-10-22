@@ -14,11 +14,11 @@ from config import Config
 warnings.filterwarnings('ignore')
 
 # Parameters and objects
-orb = cv2.ORB.create(nfeatures=60)
+orb = cv2.ORB.create(nfeatures=100)
 bf_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
 cluster = KMeans(n_clusters=2)
 FRAME_INTERVAL = Config['scan_setting']['interval']
-ROI_RATIO = 0.5
+ROI_RATIO = 0.25
 
 # create necessary folders
 for folder_name in ['inspection', 'result']:
@@ -81,6 +81,14 @@ def scan(video_path):
                         color=(0, 255, 0), 
                         flags=0)
                     
+                    for kp2_idx, kp1_idx in paired_keypoints_info_array[:, :2]:
+                        cv2.line(
+                            frame, 
+                            np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), 
+                            np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int), 
+                            [0, 0, 255], 
+                            2)
+                    
                     camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.001
 
                     if camera_pan == False:
@@ -90,8 +98,8 @@ def scan(video_path):
                             group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
                             group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
-                            group0_v_travel = 0 if ttest_1samp(group0_v_travel_array, 0).pvalue > 0.005 else np.median(group0_v_travel_array)
-                            group1_v_travel = 0 if ttest_1samp(group1_v_travel_array, 0).pvalue > 0.005 else np.median(group1_v_travel_array)
+                            group0_v_travel = 0 if ttest_1samp(group0_v_travel_array, 0).pvalue > 0.0005 else np.median(group0_v_travel_array)
+                            group1_v_travel = 0 if ttest_1samp(group1_v_travel_array, 0).pvalue > 0.0005 else np.median(group1_v_travel_array)
 
                             if abs(group0_v_travel) > abs(group1_v_travel):
                                 vertical_travel_distance = int(group1_v_travel - group0_v_travel)
@@ -123,4 +131,4 @@ for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 
 # with Pool(2) as pool:
 #     pool.map(scan, path_list)
 
-scan("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
+scan("data/micro travel short sample1.mp4")
