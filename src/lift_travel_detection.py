@@ -14,8 +14,8 @@ from config import Config
 warnings.filterwarnings('ignore')
 
 # Parameters and objects
-orb = cv2.ORB.create(nfeatures=100)
-bf_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
+feature_detector = cv2.ORB.create(nfeatures=100)
+feature_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
 cluster = KMeans(n_clusters=2)
 FRAME_INTERVAL = Config['scan_setting']['interval']
 ROI_RATIO = 0.25
@@ -36,7 +36,7 @@ def scan(video_path):
     mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1
 
     # detect keypoints
-    keypoint_list1, feature_descrpitor1 = orb.detectAndCompute(frame, mask)
+    keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
     frame = cv2.drawKeypoints(frame, keypoint_list1, None, color=(0, 255, 0), flags=0)
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -48,12 +48,12 @@ def scan(video_path):
         frame_idx += 1
 
         if ret and frame_idx % FRAME_INTERVAL == 0:
-            keypoint_list2, feature_descrpitor2 = orb.detectAndCompute(frame, mask)
+            keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame, mask)
             vertical_travel_distance = 0
             camera_pan = False
 
             if feature_descrpitor1 is not None and feature_descrpitor2 is not None:
-                matches = bf_matcher.match(feature_descrpitor2, feature_descrpitor1)
+                matches = feature_matcher.match(feature_descrpitor2, feature_descrpitor1)
                 paired_keypoints_info_array = []
 
                 for match_info in matches:
@@ -98,8 +98,8 @@ def scan(video_path):
                             group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
                             group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
-                            group0_v_travel = 0 if ttest_1samp(group0_v_travel_array, 0).pvalue > 0.0005 else np.median(group0_v_travel_array)
-                            group1_v_travel = 0 if ttest_1samp(group1_v_travel_array, 0).pvalue > 0.0005 else np.median(group1_v_travel_array)
+                            group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.005 else 0
+                            group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.005 else 0
 
                             if abs(group0_v_travel) > abs(group1_v_travel):
                                 vertical_travel_distance = int(group1_v_travel - group0_v_travel)
@@ -131,4 +131,4 @@ for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 
 # with Pool(2) as pool:
 #     pool.map(scan, path_list)
 
-scan("data/micro travel short sample1.mp4")
+scan("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
