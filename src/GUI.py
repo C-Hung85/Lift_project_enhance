@@ -7,3 +7,5 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 # def main():
     # st.sidebar
+
+value = streamlit_image_coordinates()
