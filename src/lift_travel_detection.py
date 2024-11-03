@@ -5,6 +5,8 @@ sys.path.append("src/")
 import cv2
 import warnings
 import utils
+import datetime
+import pandas as pd
 import numpy as np
 from scipy.stats import ttest_1samp
 from sklearn.cluster import KMeans
@@ -14,6 +16,7 @@ from config import Config
 warnings.filterwarnings('ignore')
 
 # Parameters and objects
+DATA_FOLDER = Config['files']['data_folder']
 feature_detector = cv2.ORB.create(nfeatures=100)
 feature_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
 cluster = KMeans(n_clusters=2)
@@ -22,7 +25,7 @@ ROI_RATIO = 0.25
 
 # create necessary folders
 for folder_name in ['inspection', 'result']:
-    os.makedirs(folder_name, exist_ok=True)
+    os.makedirs(os.path.join(DATA_FOLDER, 'lifts', folder_name), exist_ok=True)
 
 def scan(video_path):
     vidcap = cv2.VideoCapture(video_path)
@@ -35,22 +38,31 @@ def scan(video_path):
     mask = np.zeros((h, w), dtype=np.uint8)
     mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1
 
+    # record container
+    result = {
+        'frame_idx':[],
+        'keypoints':[], 
+        'camera_pan':[],
+        'v_travel_distance':[],
+        'kp_pair_lines':[]
+    }
+
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
     frame = cv2.drawKeypoints(frame, keypoint_list1, None, color=(0, 255, 0), flags=0)
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(video_path.replace("data", "result"), fourcc, fps, (w, h))
-    out.write(frame)
-
     while ret:
         ret, frame = vidcap.read()
         frame_idx += 1
 
         if ret and frame_idx % FRAME_INTERVAL == 0:
             keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame, mask)
+
+            # default values
             vertical_travel_distance = 0
             camera_pan = False
+            display_keypoints = []
+            kp_pair_lines = []
 
             if feature_descrpitor1 is not None and feature_descrpitor2 is not None:
                 matches = feature_matcher.match(feature_descrpitor2, feature_descrpitor1)
@@ -89,46 +101,85 @@ def scan(video_path):
                             [0, 0, 255], 
                             2)
                     
+                    display_keypoints = [keypoint_list2[kp2_idx] for kp2_idx in paired_keypoints_info_array[:, 0].astype(int)]
+                    kp_pair_lines = [(np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int)) \
+                                     for kp2_idx, kp1_idx in paired_keypoints_info_array[:, :2]]
                     camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.001
+                    group_idx_array = cluster.fit_predict(paired_keypoints_info_array[:, 2].reshape(-1, 1))
 
-                    if camera_pan == False:
-                        group_idx_array = cluster.fit_predict(paired_keypoints_info_array[:, 2].reshape(-1, 1))
+                    if len(set(group_idx_array)) > 1:
+                        group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
+                        group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
-                        if len(set(group_idx_array)) > 1:
-                            group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
-                            group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
+                        group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.005 else 0
+                        group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.005 else 0
 
-                            group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.005 else 0
-                            group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.005 else 0
+                        if abs(group0_v_travel) > abs(group1_v_travel):
+                            vertical_travel_distance = int(group1_v_travel - group0_v_travel)
+                        else:
+                            vertical_travel_distance = int(group0_v_travel - group1_v_travel)
+                    else:
+                        vertical_travel_distance = 0
+                    
+            result['frame_idx'].append(frame_idx)
+            result['keypoints'].append(display_keypoints)
+            result['kp_pair_lines'].append(kp_pair_lines)
+            result['camera_pan'].append(camera_pan)
+            result['v_travel_distance'].append(vertical_travel_distance)
 
-                            if abs(group0_v_travel) > abs(group1_v_travel):
-                                vertical_travel_distance = int(group1_v_travel - group0_v_travel)
-                            else:
-                                vertical_travel_distance = int(group0_v_travel - group1_v_travel)
-            
-            cv2.putText(
-                frame, 
-                "camera pan" if camera_pan else f"pixel travel: {vertical_travel_distance} pixels", 
-                (10, h-40), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                1, 
-                (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
-                2)
-            
-            out.write(frame)
             keypoint_list1 = keypoint_list2
             feature_descrpitor1 = feature_descrpitor2
+    
+    # post-process the result
+    for idx in range(1, len(result['v_travel_distance'])-1):
+        if result['v_travel_distance'][idx] != 0 and (result['v_travel_distance'][idx-1]==0 and result['v_travel_distance'][idx+1]==0):
+            result['v_travel_distance'][idx] = 0
+
+    # original video reset to frame 1
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_path.replace("data", "inspection"), fourcc, fps, (w, h))
+
+    for frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance in zip(
+        result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance']):
+
+        # read the indicated frame from the original video
+        vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = vidcap.read()
+
+        # draw the display info
+        frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
+        for coord1, coord2 in kp_pair_lines:
+            cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
+        
+        cv2.putText(
+            frame, 
+            "camera pan" if camera_pan else f"pixel travel: {vertical_travel_distance} pixels", 
+            (10, h-40), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            1, 
+            (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
+            2)
+        
+        out.write(frame)
             
     out.release()
+
+    # write down the record
+    pd.DataFrame({
+        'second':[round(i/(fps*FRAME_INTERVAL), 3) for i in result['frame_idx']],
+        'vertical_travel_distance':result['v_travel_distance']
+    }).to_csv(video_path.replace("data", "result").split(sep=".")[0]+".csv", index=False)
+
     print(f"complete: {video_path}")
 
 
 path_list = []
-for root, folder, files in os.walk(os.path.join(Config['files']['data_folder'], 'lifts','data')):
+for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
     for file in files:
         path_list.append(os.path.join(root, file))
 
-# with Pool(2) as pool:
-#     pool.map(scan, path_list)
+with Pool(2) as pool:
+    pool.map(scan, path_list)
 
-scan("/media/belkanwar/SATA_CORE/lifts/data/micro travel short sample1.mp4")
+# scan(os.path.join(DATA_FOLDER, "lifts", "data", "micro travel short sample1.mp4"))
+
