@@ -32,7 +32,6 @@ def scan(video_path):
     ret, frame = vidcap.read()
     h, w = frame.shape[:2]
     fps = vidcap.get(cv2.CAP_PROP_FPS)/FRAME_INTERVAL
-    frame_idx = 0
 
     # create a mask to define the ROI
     mask = np.zeros((h, w), dtype=np.uint8)
@@ -49,11 +48,10 @@ def scan(video_path):
 
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
-    frame = cv2.drawKeypoints(frame, keypoint_list1, None, color=(0, 255, 0), flags=0)
     
     while ret:
+        frame_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
         ret, frame = vidcap.read()
-        frame_idx += 1
 
         if ret and frame_idx % FRAME_INTERVAL == 0:
             keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame, mask)
@@ -146,21 +144,22 @@ def scan(video_path):
         vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = vidcap.read()
 
+        if ret:
         # draw the display info
-        frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
-        for coord1, coord2 in kp_pair_lines:
-            cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
-        
-        cv2.putText(
-            frame, 
-            "camera pan" if camera_pan else f"pixel travel: {vertical_travel_distance} pixels", 
-            (10, h-40), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            1, 
-            (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
-            2)
-        
-        out.write(frame)
+            frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
+            for coord1, coord2 in kp_pair_lines:
+                cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
+            
+            cv2.putText(
+                frame, 
+                "camera pan" if camera_pan else f"pixel travel: {vertical_travel_distance} pixels", 
+                (10, h-40), 
+                cv2.FONT_HERSHEY_SIMPLEX, 
+                1, 
+                (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
+                2)
+            
+            out.write(frame)
             
     out.release()
 
