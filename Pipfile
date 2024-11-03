@@ -10,6 +10,8 @@ easyocr = "*"
 matplotlib = "*"
 seaborn = "*"
 scikit-learn = "*"
+streamlit = "*"
+streamlit-image-coordinates = "*"
 
 [dev-packages]
 
