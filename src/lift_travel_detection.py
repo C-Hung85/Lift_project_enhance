@@ -11,7 +11,7 @@ import numpy as np
 from scipy.stats import ttest_1samp
 from sklearn.cluster import KMeans
 from multiprocessing import Pool
-from config import Config
+from config import Config, video_config
 
 warnings.filterwarnings('ignore')
 
@@ -27,11 +27,15 @@ ROI_RATIO = 0.25
 for folder_name in ['inspection', 'result']:
     os.makedirs(os.path.join(DATA_FOLDER, 'lifts', folder_name), exist_ok=True)
 
-def scan(video_path):
+def scan(video_path, file_name):
     vidcap = cv2.VideoCapture(video_path)
     ret, frame = vidcap.read()
     h, w = frame.shape[:2]
-    fps = vidcap.get(cv2.CAP_PROP_FPS)/FRAME_INTERVAL
+    video_length = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = vidcap.get(cv2.CAP_PROP_FPS)
+
+    start_frame = int(video_config.get(file_name, {}).get('start', 0) * fps)
+    end_frame = int(video_config.get(file_name, {}).get('end', video_length/fps) * fps)
 
     # create a mask to define the ROI
     mask = np.zeros((h, w), dtype=np.uint8)
@@ -48,10 +52,16 @@ def scan(video_path):
 
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
-    
+
+    # set video to the start point
+    vidcap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
     while ret:
         frame_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
         ret, frame = vidcap.read()
+
+        if frame_idx >= end_frame:
+            break
 
         if ret and frame_idx % FRAME_INTERVAL == 0:
             keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame, mask)
@@ -123,7 +133,7 @@ def scan(video_path):
             result['keypoints'].append(display_keypoints)
             result['kp_pair_lines'].append(kp_pair_lines)
             result['camera_pan'].append(camera_pan)
-            result['v_travel_distance'].append(vertical_travel_distance)
+            result['v_travel_distance'].append(vertical_travel_distance * 10 / video_scale_dict[file_name])
 
             keypoint_list1 = keypoint_list2
             feature_descrpitor1 = feature_descrpitor2
@@ -135,7 +145,7 @@ def scan(video_path):
 
     # original video reset to frame 1
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(video_path.replace("data", "inspection"), fourcc, fps, (w, h))
+    out = cv2.VideoWriter(video_path.replace("data", "inspection"), fourcc, fps/FRAME_INTERVAL, (w, h))
 
     for frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance in zip(
         result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance']):
@@ -152,7 +162,7 @@ def scan(video_path):
             
             cv2.putText(
                 frame, 
-                "camera pan" if camera_pan else f"pixel travel: {vertical_travel_distance} pixels", 
+                "camera pan" if camera_pan else f"travel: {vertical_travel_distance} mm", 
                 (10, h-40), 
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 1, 
@@ -165,20 +175,38 @@ def scan(video_path):
 
     # write down the record
     pd.DataFrame({
-        'second':[round(i/(fps*FRAME_INTERVAL), 3) for i in result['frame_idx']],
+        'second':[round(i/(fps), 3) for i in result['frame_idx']],
         'vertical_travel_distance':result['v_travel_distance']
     }).to_csv(video_path.replace("data", "result").split(sep=".")[0]+".csv", index=False)
 
     print(f"complete: {video_path}")
 
 
-path_list = []
-for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
+video_scale_dict = {}
+for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts', 'scale_images')):
     for file in files:
-        path_list.append(os.path.join(root, file))
+        video_name = "-".join(file.split(sep="-")[:-1]) + ".mp4"
+        image = cv2.imread(os.path.join(os.path.join(root, file)))
+        filtered_array = (image[..., 0] < 10) * (image[..., 1] < 10) * (image[..., 2] > 250)
+        points = np.where(filtered_array)
+        distance = np.sqrt((points[0][0] - points[0][1])**2 + (points[1][0] - points[1][1])**2)
+        if video_name in video_scale_dict:
+            video_scale_dict[video_name].append(distance)
+        else:
+            video_scale_dict[video_name] = [distance]
 
-with Pool(2) as pool:
-    pool.map(scan, path_list)
+video_scale_dict = {video:np.mean(values) for video, values in video_scale_dict.items()}
 
-# scan(os.path.join(DATA_FOLDER, "lifts", "data", "micro travel short sample1.mp4"))
+
+# path_list = []
+# for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
+#     for file in files:
+#         path_list.append([os.path.join(root, file), file])
+
+
+# with Pool(2) as pool:
+#     pool.starmap(scan, path_list)
+
+
+scan(os.path.join(DATA_FOLDER, "lifts", "data", "2.mp4"), "2.mp4")
 
