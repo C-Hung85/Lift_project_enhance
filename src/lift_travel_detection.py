@@ -21,7 +21,7 @@ feature_detector = cv2.ORB.create(nfeatures=100)
 feature_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
 cluster = KMeans(n_clusters=2)
 FRAME_INTERVAL = Config['scan_setting']['interval']
-ROI_RATIO = 0.25
+ROI_RATIO = 0.6
 
 # create necessary folders
 for folder_name in ['inspection', 'result']:
@@ -43,6 +43,7 @@ def scan(video_path, file_name):
 
     # record container
     result = {
+        'frame':[],
         'frame_idx':[],
         'keypoints':[], 
         'camera_pan':[],
@@ -93,21 +94,6 @@ def scan(video_path, file_name):
                 paired_keypoints_info_array = paired_keypoints_info_array[utils.remove_outlier_idx(paired_keypoints_info_array[:, 2], 'upper')]
 
                 if paired_keypoints_info_array.shape[0] > 1:
-
-                    frame = cv2.drawKeypoints(
-                        frame, 
-                        [keypoint_list2[i] for i in paired_keypoints_info_array[:, 0].astype(int)], 
-                        None, 
-                        color=(0, 255, 0), 
-                        flags=0)
-                    
-                    for kp2_idx, kp1_idx in paired_keypoints_info_array[:, :2]:
-                        cv2.line(
-                            frame, 
-                            np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), 
-                            np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int), 
-                            [0, 0, 255], 
-                            2)
                     
                     display_keypoints = [keypoint_list2[kp2_idx] for kp2_idx in paired_keypoints_info_array[:, 0].astype(int)]
                     kp_pair_lines = [(np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int)) \
@@ -119,8 +105,8 @@ def scan(video_path, file_name):
                         group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
                         group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
-                        group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.005 else 0
-                        group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.005 else 0
+                        group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.0001 else 0
+                        group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.0001 else 0
 
                         if abs(group0_v_travel) > abs(group1_v_travel):
                             vertical_travel_distance = int(group1_v_travel - group0_v_travel)
@@ -128,7 +114,8 @@ def scan(video_path, file_name):
                             vertical_travel_distance = int(group0_v_travel - group1_v_travel)
                     else:
                         vertical_travel_distance = 0
-                    
+            
+            result['frame'].append(frame)
             result['frame_idx'].append(frame_idx)
             result['keypoints'].append(display_keypoints)
             result['kp_pair_lines'].append(kp_pair_lines)
@@ -147,12 +134,15 @@ def scan(video_path, file_name):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(video_path.replace("data", "inspection"), fourcc, fps/FRAME_INTERVAL, (w, h))
 
-    for frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance in zip(
-        result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance']):
+    travel_distance_sum = 0
+
+    for frame, frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance in zip(
+        result['frame'], result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance']):
+        travel_distance_sum += vertical_travel_distance
 
         # read the indicated frame from the original video
-        vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = vidcap.read()
+        # vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        # ret, frame = vidcap.read()
 
         if ret:
         # draw the display info
@@ -162,8 +152,8 @@ def scan(video_path, file_name):
             
             cv2.putText(
                 frame, 
-                "camera pan" if camera_pan else f"travel: {vertical_travel_distance} mm", 
-                (10, h-40), 
+                f"""{round(frame_idx/fps, 1)} sec  {"camera pan" if camera_pan else f"travel: {round(travel_distance_sum, 5)} mm"}""", 
+                (10, h-80), 
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 1, 
                 (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 

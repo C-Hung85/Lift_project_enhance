@@ -34,10 +34,10 @@ def remove_outlier_idx(input_array:npt.NDArray, mode:Literal['upper', 'lower', '
     q3 = np.quantile(input_array, 0.75)
     
     if mode in {'upper', 'two-side'}:
-        output_array = np.where(input_array <= q3 + 1.5*(q3-q1))[0]
+        output_array = np.where(input_array <= q3 + 3.0*(q3-q1))[0]
     elif mode in {'lower', 'two-side'}:
-        output_array = np.where(input_array >= q1 - 1.5*(q3-q1))[0]
+        output_array = np.where(input_array >= q1 - 3.9*(q3-q1))[0]
     else:
-        output_array = np.where((input_array <= q3 + 1.5*(q3-q1)) & (input_array >= q1 - 1.5*(q3-q1)))[0]
+        output_array = np.where((input_array <= q3 + 3.0*(q3-q1)) & (input_array >= q1 - 3.0*(q3-q1)))[0]
 
     return output_array
