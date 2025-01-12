@@ -144,22 +144,21 @@ def scan(video_path, file_name):
         # vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         # ret, frame = vidcap.read()
 
-        if ret:
         # draw the display info
-            frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
-            for coord1, coord2 in kp_pair_lines:
-                cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
-            
-            cv2.putText(
-                frame, 
-                f"""{round(frame_idx/fps, 1)} sec  {"camera pan" if camera_pan else f"travel: {round(travel_distance_sum, 5)} mm"}""", 
-                (10, h-80), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                1, 
-                (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
-                2)
-            
-            out.write(frame)
+        frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
+        for coord1, coord2 in kp_pair_lines:
+            cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
+        
+        cv2.putText(
+            frame, 
+            f"""{round(frame_idx/fps, 1)} sec  {"camera pan" if camera_pan else f"travel: {round(travel_distance_sum, 5)} mm"}""", 
+            (10, h-80), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            1, 
+            (0, 255, 255) if camera_pan else ((0, 0, 255) if vertical_travel_distance==0 else (0, 255, 0)), 
+            2)
+        
+        out.write(frame)
             
     out.release()
 
