@@ -101,7 +101,7 @@ def scan(video_path, file_name):
                     camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.001
                     group_idx_array = cluster.fit_predict(paired_keypoints_info_array[:, 2].reshape(-1, 1))
 
-                    if len(set(group_idx_array)) > 1:
+                    if len(set(group_idx_array)) > 1 and camera_pan == False:
                         group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
                         group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
 
@@ -188,15 +188,10 @@ for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts', 'scale_ima
 video_scale_dict = {video:np.mean(values) for video, values in video_scale_dict.items()}
 
 
-# path_list = []
-# for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
-#     for file in files:
-#         path_list.append([os.path.join(root, file), file])
+for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
+    for file in files:
+        scan(os.path.join(root, file), file)
 
 
-# with Pool(2) as pool:
-#     pool.starmap(scan, path_list)
-
-
-scan(os.path.join(DATA_FOLDER, "lifts", "data", "2.mp4"), "2.mp4")
+# scan(os.path.join(DATA_FOLDER, "lifts", "data", "2.mp4"), "2.mp4")
 
