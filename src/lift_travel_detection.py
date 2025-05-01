@@ -165,7 +165,7 @@ def scan(video_path, file_name):
     # write down the record
     pd.DataFrame({
         'second':[round(i/(fps), 3) for i in result['frame_idx']],
-        'vertical_travel_distance':result['v_travel_distance']
+        'vertical_travel_distance (mm)':result['v_travel_distance']
     }).to_csv(video_path.replace("data", "result").split(sep=".")[0]+".csv", index=False)
 
     print(f"complete: {video_path}")
