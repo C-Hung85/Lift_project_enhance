@@ -178,7 +178,8 @@ for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts', 'scale_ima
         image = cv2.imread(os.path.join(os.path.join(root, file)))
         filtered_array = (image[..., 0] < 10) * (image[..., 1] < 10) * (image[..., 2] > 250)
         points = np.where(filtered_array)
-        distance = np.sqrt((points[0][0] - points[0][1])**2 + (points[1][0] - points[1][1])**2)
+        distance = abs(points[0][0] - points[0][1])
+        # distance = np.sqrt((points[0][0] - points[0][1])**2 + (points[1][0] - points[1][1])**2)
         if video_name in video_scale_dict:
             video_scale_dict[video_name].append(distance)
         else:
