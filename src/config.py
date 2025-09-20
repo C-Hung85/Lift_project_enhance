@@ -2,7 +2,7 @@ import os
 
 Config = {}
 
-Config['files'] = {'data_folder': os.getenv('SATA', 'data/')}
+Config['files'] = {'data_folder': os.getenv('SATA', './')}
 Config['scan_setting'] = {'interval':6}
 
 video_config = {
