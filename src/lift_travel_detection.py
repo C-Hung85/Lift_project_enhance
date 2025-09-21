@@ -36,10 +36,11 @@ def scan(video_path, file_name):
 
     start_frame = int(video_config.get(file_name, {}).get('start', 0) * fps)
     end_frame = int(video_config.get(file_name, {}).get('end', video_length/fps) * fps)
+    roi_ratio = float(video_config.get(file_name, {}).get('roi_ratio', ROI_RATIO))
 
     # create a mask to define the ROI
     mask = np.zeros((h, w), dtype=np.uint8)
-    mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1
+    mask[int(h*roi_ratio/2):int(h*(1-roi_ratio/2)), int(w*roi_ratio/2):int(w*(1-roi_ratio/2))] = 1
 
     # record container
     result = {
