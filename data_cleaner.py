@@ -365,6 +365,7 @@ class DataCleaner:
         """
         處理單個CSV檔案並生成詳細報告
         """
+        frame_indices = []
         times = []
         values = []
         
@@ -373,11 +374,25 @@ class DataCleaner:
             reader = csv.reader(f)
             header = next(reader)  # 讀取標題行
             
+            # 檢查是否為新格式（包含frame_idx）
+            has_frame_idx = len(header) >= 3 and 'frame' in header[0].lower()
+            
             for row in reader:
-                if len(row) >= 2:
+                if has_frame_idx and len(row) >= 3:
+                    try:
+                        frame_idx = int(row[0])
+                        time_val = float(row[1])
+                        displacement_val = float(row[2])
+                        frame_indices.append(frame_idx)
+                        times.append(time_val)
+                        values.append(displacement_val)
+                    except ValueError:
+                        continue
+                elif not has_frame_idx and len(row) >= 2:
                     try:
                         time_val = float(row[0])
                         displacement_val = float(row[1])
+                        frame_indices.append(len(times))  # 使用索引作為frame_idx
                         times.append(time_val)
                         values.append(displacement_val)
                     except ValueError:
@@ -391,8 +406,12 @@ class DataCleaner:
             writer = csv.writer(f)
             writer.writerow(header)  # 寫入標題行
             
-            for time_val, clean_val in zip(times, cleaned_values):
-                writer.writerow([time_val, clean_val])
+            if has_frame_idx:
+                for frame_idx, time_val, clean_val in zip(frame_indices, times, cleaned_values):
+                    writer.writerow([frame_idx, time_val, clean_val])
+            else:
+                for time_val, clean_val in zip(times, cleaned_values):
+                    writer.writerow([time_val, clean_val])
         
         # 生成清理報告
         report = self._generate_cleaning_report(

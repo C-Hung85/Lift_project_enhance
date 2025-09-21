@@ -299,12 +299,23 @@ class VideoHandler:
         if self.rotation_angle != 0:
             print(f"旋轉角度: {self.rotation_angle}°")
 
-    def get_frame_at_index(self, frame_number: int) -> Optional[np.ndarray]:
+    def get_frame_at_index(self, frame_number) -> Optional[np.ndarray]:
         """獲取指定幀號的影片幀"""
-        print(f"影片幀提取: 幀號={frame_number}")
+        # 確保幀號是整數
+        frame_number = int(frame_number)
+        
+        print(f"\n=== 精確幀號提取 ===")
+        print(f"目標幀號: {frame_number} (整數轉換)")
+        print(f"影片FPS: {self.fps:.3f}")
+        print(f"總幀數: {self.total_frames}")
+        print(f"對應時戳: {frame_number / self.fps:.6f}s")
         
         if frame_number >= self.total_frames:
-            print(f"錯誤: 幀號 {frame_number} 超出範圍 (總幀數: {self.total_frames})")
+            print(f"❌ 錯誤: 幀號 {frame_number} 超出範圍 (總幀數: {self.total_frames})")
+            return None
+        
+        if frame_number < 0:
+            print(f"❌ 錯誤: 幀號 {frame_number} 不能為負數")
             return None
         
         success = False
@@ -312,39 +323,57 @@ class VideoHandler:
         for attempt in range(max_attempts):
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
             actual_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-            print(f"嘗試 {attempt+1}: 設置幀位置 目標={frame_number}, 實際={int(actual_pos)}")
+            position_error = abs(actual_pos - frame_number)
+            print(f"嘗試 {attempt+1}: 設置幀位置 目標={frame_number}, 實際={int(actual_pos)}, 誤差={position_error:.1f}")
             
-            if abs(actual_pos - frame_number) < 1:
+            if position_error < 1:
                 ret, frame = self.cap.read()
                 if ret:
-                    print(f"成功讀取幀 {frame_number} (嘗試 {attempt+1})")
+                    print(f"✅ 成功讀取幀 {frame_number} (嘗試 {attempt+1})")
                     success = True
                     break
+                else:
+                    print(f"❌ 幀位置正確但讀取失敗 (嘗試 {attempt+1})")
+            else:
+                print(f"⚠️ 幀位置誤差過大 (嘗試 {attempt+1})")
             
-            print(f"重置 VideoCapture (嘗試 {attempt+1})")
+            print(f"🔄 重置 VideoCapture (嘗試 {attempt+1})")
             self.cap.release()
             self.cap = cv2.VideoCapture(self.video_path)
         
         if not success:
-            print("使用全新 VideoCapture 重試...")
+            print("🔄 使用全新 VideoCapture 最後重試...")
             temp_cap = cv2.VideoCapture(self.video_path)
             temp_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            actual_final = temp_cap.get(cv2.CAP_PROP_POS_FRAMES)
+            print(f"最終幀位置: 目標={frame_number}, 實際={int(actual_final)}")
             ret, frame = temp_cap.read()
             temp_cap.release()
             if not ret:
-                print(f"錯誤: 無法讀取幀 {frame_number}")
+                print(f"❌ 最終錯誤: 無法讀取幀 {frame_number}")
                 return None
+            else:
+                print(f"✅ 最終成功讀取幀 {frame_number}")
         
         if self.rotation_angle != 0:
+            print(f"🔄 應用旋轉校正: {self.rotation_angle}°")
             frame = rotate_frame(frame, self.rotation_angle)
         
-        print(f"成功提取幀 {frame_number}, 尺寸: {frame.shape}")
+        print(f"✅ 幀提取完成 - 幀號: {frame_number}, 尺寸: {frame.shape}")
+        print(f"📊 驗證: 計算時戳 = {frame_number / self.fps:.6f}s")
+        print("===================\n")
         return frame
 
     def get_frame_at_timestamp(self, timestamp: float) -> Optional[np.ndarray]:
         """獲取指定時戳的影片幀 (舊版，可能有偏差)"""
         frame_number = int(timestamp * self.fps)
-        print(f"影片幀提取 (估算): 時戳={timestamp:.3f}s → 幀號={frame_number}")
+        print(f"\n=== 時戳估算提取 ===")
+        print(f"⚠️ 警告: 使用時戳估算，精度可能不如直接幀號")
+        print(f"輸入時戳: {timestamp:.6f}s")
+        print(f"影片FPS: {self.fps:.3f}")
+        print(f"估算幀號: {frame_number}")
+        print(f"估算誤差: ±{0.5/self.fps:.6f}s")
+        print("=====================")
         return self.get_frame_at_index(frame_number)
     
     def __del__(self):
@@ -368,7 +397,7 @@ class CorrectionApp:
         self.reference_lines = []  # 儲存當前群集的參考線段
         self.current_line_points = []  # 儲存當前正在標記的線段點 [(x1,y1), (x2,y2)]
         self.roi_rect = None  # (x, y, width, height)
-        self.zoom_factor = 4
+        self.zoom_factor = 8  # 增加到8倍放大以提高精度
         
         # GUI 組件
         self.setup_ui()
@@ -380,7 +409,8 @@ class CorrectionApp:
     def setup_ui(self):
         """設置使用者界面"""
         self.root.deiconify()
-        self.root.title("半自動位移校正工具")
+        # 初始標題（會在 show_current_cluster 中更新）
+        self.root.title("半自動位移校正工具 - 載入中...")
         self.root.geometry("1200x800")
         
         # 頂部資訊欄
@@ -437,44 +467,79 @@ class CorrectionApp:
         # 檢查是否有前零點
         has_pre_zero = getattr(cluster, 'has_pre_zero', True)
         
-        # 決定要顯示的時戳
+        # 決定要顯示的時戳和幀號
         if self.current_phase in ["roi_selection", "line_marking_1"]:
             if has_pre_zero:
                 timestamp = cluster.timestamps[0]  # 前零點
+                frame_id = int(cluster.frame_indices[0]) if cluster.frame_indices else None
                 description = "群集前零點 (第一條線段)"
             else:
                 timestamp = cluster.timestamps[0]  # 群集開始點（第一行就有位移）
+                frame_id = int(cluster.frame_indices[0]) if cluster.frame_indices else None
                 description = "群集開始點 (檔案開頭)"
         else:  # line_marking_2
             timestamp = cluster.timestamps[-1]  # 群集結束點
+            frame_id = int(cluster.frame_indices[-1]) if cluster.frame_indices else None
             description = "群集結束點 (第二條線段)"
             
-        # 添加調試信息
-        print(f"\n=== 時戳調試信息 ===")
+        # 添加調試信息（包含幀號）
+        print(f"\n=== 時戳/幀號調試信息 ===")
         print(f"當前階段: {self.current_phase}")
         print(f"群集索引: {cluster.start_index} 到 {cluster.end_index}")
         print(f"有前零點: {has_pre_zero}")
         print(f"時戳數組: {cluster.timestamps}")
+        # 將幀號轉換為整數顯示
+        frame_indices_int = [int(f) for f in cluster.frame_indices] if cluster.frame_indices else []
+        print(f"幀號數組: {frame_indices_int}")
         print(f"選中時戳: {timestamp:.6f}s (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
+        print(f"選中幀號: {frame_id} (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
         print(f"時戳差異: {cluster.timestamps[-1] - cluster.timestamps[0]:.6f}s")
+        if cluster.frame_indices and len(cluster.frame_indices) > 1:
+            print(f"幀號差異: {int(cluster.frame_indices[-1]) - int(cluster.frame_indices[0])} 幀")
         if len(cluster.original_values) > 0:
             print(f"原始位移值: {cluster.original_values}")
-            print(f"位移總和: {sum(abs(v) for v in cluster.original_values):.3f}")
-        print("===================")
+            print(f"位移總和: {sum(abs(v) for v in cluster.original_values):.3f}mm")
+            # 計算理論像素差異來幫助用戶識別
+            expected_pixel_movement = (sum(abs(v) for v in cluster.original_values) * self.data_manager.scale_factor) / 10.0
+            print(f"📏 預期位移: {sum(abs(v) for v in cluster.original_values):.3f}mm ≈ {expected_pixel_movement:.1f} 像素")
+            print(f"💡 提示: 在標記時請注意這個預期的像素移動量")
+        print("=========================")
         
-        # 更新資訊
+        # 更新資訊（包含幀號）
         total_clusters = self.data_manager.get_total_clusters()
         cluster_info = f"檔案: {self.video_handler.video_name} | "
         cluster_info += f"群集: {self.current_cluster_index + 1}/{total_clusters} | "
-        cluster_info += f"時戳: {timestamp:.3f}s | "
-        cluster_info += f"標記點: {description}"
+        cluster_info += f"時戳: {timestamp:.3f}s"
+        if frame_id is not None:
+            cluster_info += f" | 幀號: {frame_id}"
+        cluster_info += f" | {description}"
         
         self.info_label.config(text=cluster_info)
         
-        # 顯示影片幀
-        frame = self.video_handler.get_frame_at_timestamp(timestamp)
+        # 更新視窗標題（包含當前群集和幀號信息）
+        window_title = f"半自動位移校正工具 - {self.video_handler.video_name}"
+        window_title += f" | 群集 {self.current_cluster_index + 1}/{total_clusters}"
+        if frame_id is not None:
+            window_title += f" | 幀號: {frame_id}"
+        window_title += f" | 時戳: {timestamp:.3f}s"
+        self.root.title(window_title)
+        
+        # 顯示影片幀（優先使用幀號進行精確定位）
+        if frame_id is not None and self.data_manager.use_frame_indices:
+            frame = self.video_handler.get_frame_at_index(frame_id)
+            print(f"使用幀號 {frame_id} 進行精確定位")
+        else:
+            frame = self.video_handler.get_frame_at_timestamp(timestamp)
+            print(f"退回使用時戳 {timestamp:.3f}s 進行估算定位")
+            
         if frame is None:
-            messagebox.showerror("錯誤", f"無法獲取時戳 {timestamp:.3f}s 的影片幀")
+            error_msg = f"無法獲取"
+            if frame_id is not None:
+                error_msg += f"幀號 {frame_id} (時戳 {timestamp:.3f}s)"
+            else:
+                error_msg += f"時戳 {timestamp:.3f}s"
+            error_msg += " 的影片幀"
+            messagebox.showerror("錯誤", error_msg)
             return
         
         self.show_frame(frame)
@@ -484,7 +549,13 @@ class CorrectionApp:
             if not has_pre_zero:
                 self.status_label.config(text="⚠️ 故障檢測: 檔案開頭即有位移，請檢視畫面後按 [N] 選擇處理方式")
             else:
-                self.status_label.config(text="階段1: 請拖拽選擇包含參考點的ROI區域")
+                # 計算預期位移提示
+                if len(cluster.original_values) > 0:
+                    expected_mm = sum(abs(v) for v in cluster.original_values)
+                    expected_pixels = (expected_mm * self.data_manager.scale_factor) / 10.0
+                    self.status_label.config(text=f"階段1: 請拖拽選擇ROI區域 | 預期位移: {expected_mm:.1f}mm ({expected_pixels:.1f}像素)")
+                else:
+                    self.status_label.config(text="階段1: 請拖拽選擇包含參考點的ROI區域")
         
     def show_frame(self, frame: np.ndarray):
         """在畫布上顯示影片幀"""
@@ -611,11 +682,44 @@ class CorrectionApp:
         print(f"[DEBUG] ROI區域第一個像素: {self.original_frame[roi_y,roi_x] if roi_y < self.original_frame.shape[0] and roi_x < self.original_frame.shape[1] else 'out of bounds'}")
         roi_frame = self.original_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
         
-        # 放大4倍
+        # 放大到8倍
         enlarged_roi = cv2.resize(roi_frame, None, fx=self.zoom_factor, fy=self.zoom_factor, interpolation=cv2.INTER_CUBIC)
         
         # 只顯示放大的ROI，不要更新 original_frame
         self.display_frame_only(enlarged_roi)
+        
+        # 顯示已標記的線段（如果有）
+        self.redraw_existing_lines()
+    
+    def redraw_existing_lines(self):
+        """重新繪製已標記的線段"""
+        for i, line in enumerate(self.reference_lines):
+            start_canvas_coords = self.pixel_to_canvas_coords(line.start_pixel_coords)
+            end_canvas_coords = self.pixel_to_canvas_coords(line.end_pixel_coords)
+            
+            if start_canvas_coords and end_canvas_coords:
+                # 使用不同顏色區分第一條和第二條線段
+                color = "cyan" if i == 0 else "yellow"
+                line_width = 4
+                
+                # 繪製線段
+                self.canvas.create_line(
+                    start_canvas_coords[0], start_canvas_coords[1],
+                    end_canvas_coords[0], end_canvas_coords[1],
+                    fill=color, width=line_width, tags="existing_line"
+                )
+                
+                # 繪製端點
+                self.canvas.create_oval(
+                    start_canvas_coords[0] - 6, start_canvas_coords[1] - 6,
+                    start_canvas_coords[0] + 6, start_canvas_coords[1] + 6,
+                    fill=color, outline="white", width=2, tags="existing_line"
+                )
+                self.canvas.create_oval(
+                    end_canvas_coords[0] - 6, end_canvas_coords[1] - 6,
+                    end_canvas_coords[0] + 6, end_canvas_coords[1] + 6,
+                    fill=color, outline="white", width=2, tags="existing_line"
+                )
     
     def display_frame_only(self, frame: np.ndarray):
         """只顯示幀而不更新 original_frame"""
@@ -689,7 +793,7 @@ class CorrectionApp:
         pixel_coords = (original_x, original_y)
         
         if self.current_point_in_line == 0:
-            # 第一個點 - 清除之前的標記並開始新線段
+            # 第一個點 - 清除當前標記（保留已完成的線段）
             self.canvas.delete("line_marker")
             self.current_line_points = [pixel_coords]
             
@@ -706,7 +810,7 @@ class CorrectionApp:
             # 繪製終點標記
             self.draw_point_marker(canvas_x, canvas_y, "line_end")
             
-            # 繪製連接線
+            # 繪製連接線（更粗的線寬以便觀察）
             start_canvas_coords = self.pixel_to_canvas_coords(self.current_line_points[0])
             end_canvas_coords = self.pixel_to_canvas_coords(self.current_line_points[1])
             
@@ -714,7 +818,7 @@ class CorrectionApp:
                 self.canvas.create_line(
                     start_canvas_coords[0], start_canvas_coords[1],
                     end_canvas_coords[0], end_canvas_coords[1],
-                    fill="lime", width=3, tags="line_marker"
+                    fill="lime", width=6, tags="line_marker"  # 增加線寬
                 )
             
             # 儲存完整的線段
@@ -754,14 +858,14 @@ class CorrectionApp:
             self.status_label.config(text="階段1: 請拖拽選擇 ROI 區域，完成後按 [N] 確認")
         elif self.current_phase == "line_marking_1":
             if self.current_point_in_line == 0:
-                self.status_label.config(text="階段2a: 請點擊第一條參考線段的起點")
+                self.status_label.config(text="階段2a: 8倍放大精細標記 - 請點擊第一條參考線段的起點")
             else:
                 self.status_label.config(text="階段2b: 請點擊第一條參考線段的終點，完成後按 [N] 確認")
         elif self.current_phase == "line_marking_2":
             if self.current_point_in_line == 0:
-                self.status_label.config(text="階段3a: 請在第二張畫面的相同結構上標記第二條線段的起點")
+                self.status_label.config(text="階段3a: 8倍放大對比標記 - 青色線為第一條線段，請標記第二條線段起點")
             else:
-                self.status_label.config(text="階段3b: 請點擊第二條線段的終點，完成後按 [N] 確認並計算位移")
+                self.status_label.config(text="階段3b: 請點擊第二條線段終點，完成後按 [N] 確認並計算位移")
             
     def draw_point_marker(self, canvas_x: int, canvas_y: int, marker_type: str):
         """繪製點標記"""
@@ -914,6 +1018,8 @@ class CorrectionApp:
                 self.current_phase = "line_marking_2"
                 self.current_line_index = 1
                 self.current_point_in_line = 0
+                # 清除當前標記，保留已完成的線段
+                self.canvas.delete("line_marker")
                 self.show_current_cluster()
                 # 進入放大模式標記第二條線段，但保持 original_frame
                 self.enter_precision_marking_mode()
@@ -1039,13 +1145,18 @@ class CorrectionApp:
         
         measured_displacement = self.data_manager.calculate_displacement_from_lines(line1, line2)
         
-        # 顯示線段詳細資訊
+        # 顯示線段詳細資訊（包含幀號）
+        cluster = self.data_manager.get_cluster(self.current_cluster_index)
         print(f"\n=== 線段校正計算 ===")
-        print(f"第一條線段:")
+        print(f"群集範圍: 第 {cluster.start_index + 1} 行到第 {cluster.end_index + 1} 行")
+        if cluster.frame_indices:
+            print(f"幀號範圍: {int(cluster.frame_indices[0])} 到 {int(cluster.frame_indices[-1])}")
+        print(f"時戳範圍: {cluster.timestamps[0]:.6f}s 到 {cluster.timestamps[-1]:.6f}s")
+        print(f"第一條線段 (時戳: {line1.timestamp:.6f}s):")
         print(f"  起點: {line1.start_pixel_coords}")
         print(f"  終點: {line1.end_pixel_coords}")
         print(f"  Y分量: {line1.y_component:.1f} 像素")
-        print(f"第二條線段:")
+        print(f"第二條線段 (時戳: {line2.timestamp:.6f}s):")
         print(f"  起點: {line2.start_pixel_coords}")
         print(f"  終點: {line2.end_pixel_coords}")
         print(f"  Y分量: {line2.y_component:.1f} 像素")
