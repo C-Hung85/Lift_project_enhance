@@ -1,0 +1,30 @@
+[1mdiff --git a/src/config.py b/src/config.py[m
+[1mindex 0f6ead6..5ad769d 100644[m
+[1m--- a/src/config.py[m
+[1m+++ b/src/config.py[m
+[36m@@ -39,7 +39,7 @@[m [mvideo_config = {[m
+     '38-2.mp4': {'start':8*60+55, 'end': 13*60+15}, [m
+     '39.mp4': {'start':7, 'end':16*60+15}, [m
+     '40.mp4': {'end':6*60+55}, [m
+[31m-    '41.mp4': {'end':18*60+30}, [m
+[32m+[m[32m    '41.mp4': {'end':18*60+30, 'roi_ratio':0.7},[m[41m [m
+     '42.mp4': {'end':14*60}, [m
+     '43.mp4': {'start':60, 'end':12*60}, [m
+     '45.mp4': {'start':5, 'end':12*60+15}, [m
+[1mdiff --git a/src/lift_travel_detection.py b/src/lift_travel_detection.py[m
+[1mindex 457665d..2fef093 100644[m
+[1m--- a/src/lift_travel_detection.py[m
+[1m+++ b/src/lift_travel_detection.py[m
+[36m@@ -36,10 +36,11 @@[m [mdef scan(video_path, file_name):[m
+ [m
+     start_frame = int(video_config.get(file_name, {}).get('start', 0) * fps)[m
+     end_frame = int(video_config.get(file_name, {}).get('end', video_length/fps) * fps)[m
+[32m+[m[32m    roi_ratio = video_config.get(file_name, {}).get('roi_ratio', ROI_RATIO)[m
+ [m
+     # create a mask to define the ROI[m
+     mask = np.zeros((h, w), dtype=np.uint8)[m
+[31m-    mask[int(h*ROI_RATIO/2):int(h*(1-ROI_RATIO/2)), int(w*ROI_RATIO/2):int(w*(1-ROI_RATIO/2))] = 1[m
+[32m+[m[32m    mask[int(h*roi_ratio/2):int(h*(1-roi_ratio/2)), int(w*roi_ratio/2):int(w*(1-roi_ratio/2))] = 1[m
+ [m
+     # record container[m
+     result = {[m
