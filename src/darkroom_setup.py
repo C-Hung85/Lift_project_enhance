@@ -20,6 +20,13 @@ from darkroom_utils import (
     print_darkroom_summary
 )
 
+# 嘗試載入現有的暗房配置
+try:
+    from darkroom_intervals import darkroom_intervals
+except ImportError:
+    # 如果 darkroom_intervals.py 不存在，使用空字典
+    darkroom_intervals = {}
+
 
 def normalize_filename(filename):
     """標準化檔名，自動加入 .mp4 副檔名"""
@@ -190,16 +197,60 @@ def main():
     
     # 設定目錄
     data_folder = Config['files']['data_folder']
+    
+    # 載入現有的暗房設定（深拷貝以避免修改原始數據）
     darkroom_settings = {}
+    for filename, intervals in darkroom_intervals.items():
+        darkroom_settings[filename] = list(intervals)  # 複製列表
+    
+    if darkroom_settings:
+        print(f"\n📂 已載入現有設定，共 {len(darkroom_settings)} 個影片")
     
     while True:
         show_current_settings(darkroom_settings)
         
+        # 取得操作選項
+        print("\n操作選項:")
+        print("  1. 新增/修改影片的暗房區間")
+        print("  2. 刪除影片的暗房設定")
+        print("  3. 完成設定")
+        
+        choice = input("請選擇操作 [1/2/3]: ").strip()
+        
+        if choice == '3' or choice == '':
+            break
+        elif choice == '2':
+            if not darkroom_settings:
+                print("❌ 沒有任何設定可以刪除")
+                continue
+            
+            print("\n現有設定:")
+            filenames = list(darkroom_settings.keys())
+            for i, filename in enumerate(filenames, 1):
+                print(f"  {i}. {filename}")
+            
+            try:
+                del_choice = input("請輸入要刪除的影片編號 (或按 Enter 取消): ").strip()
+                if del_choice:
+                    del_index = int(del_choice) - 1
+                    if 0 <= del_index < len(filenames):
+                        del_filename = filenames[del_index]
+                        del darkroom_settings[del_filename]
+                        print(f"✅ 已刪除 {del_filename} 的暗房設定")
+                    else:
+                        print("❌ 編號無效")
+            except ValueError:
+                print("❌ 請輸入有效的編號")
+            continue
+        elif choice != '1':
+            print("❌ 無效的選擇，請重新選擇")
+            continue
+        
         # 取得影片檔名
-        filename_input = input("\n請輸入要設定暗房區間的影片檔名 (直接按 Enter 結束): ").strip()
+        filename_input = input("\n請輸入要設定暗房區間的影片檔名 (直接按 Enter 返回選單): ").strip()
         
         if not filename_input:
-            break
+            continue
         
         # 標準化檔名
         filename = normalize_filename(filename_input)
@@ -240,7 +291,17 @@ def main():
     
     # 最終確認和產生配置檔案
     if darkroom_settings:
-        print("\n📝 正在產生暗房配置檔案...")
+        # 比較原始設定和新設定
+        original_count = len(darkroom_intervals)
+        current_count = len(darkroom_settings)
+        
+        if original_count > 0:
+            print(f"\n📝 正在更新暗房配置檔案...")
+            print(f"原有設定: {original_count} 個影片")
+            print(f"更新後: {current_count} 個影片")
+        else:
+            print(f"\n📝 正在建立暗房配置檔案...")
+            print(f"新設定: {current_count} 個影片")
         
         # 驗證配置
         is_valid, errors = validate_darkroom_config(darkroom_settings)
@@ -252,17 +313,29 @@ def main():
         
         print_darkroom_summary(darkroom_settings)
         
-        final_confirm = input("\n確認產生配置檔案？ [y/n]: ").lower().strip()
+        action_word = "更新" if original_count > 0 else "建立"
+        final_confirm = input(f"\n確認{action_word}配置檔案？ [y/n]: ").lower().strip()
         if final_confirm in ['y', 'yes', '']:
             if update_darkroom_config(darkroom_settings):
-                print(f"\n🎉 設定完成！已產生 darkroom_intervals.py")
+                print(f"\n🎉 設定完成！已{action_word} darkroom_intervals.py")
                 print("💡 執行主程式時會自動忽略這些時間區間的運動偵測")
             else:
-                print(f"\n❌ 配置檔案產生失敗")
+                print(f"\n❌ 配置檔案{action_word}失敗")
         else:
-            print(f"\n❌ 已取消配置檔案產生")
+            print(f"\n❌ 已取消配置檔案{action_word}")
     else:
-        print(f"\n⚠️  沒有設定任何暗房區間")
+        if len(darkroom_intervals) > 0:
+            print(f"\n⚠️  所有暗房區間設定已被刪除")
+            clear_confirm = input("確認清空配置檔案？ [y/n]: ").lower().strip()
+            if clear_confirm in ['y', 'yes', '']:
+                if update_darkroom_config({}):
+                    print(f"\n✅ 配置檔案已清空")
+                else:
+                    print(f"\n❌ 配置檔案清空失敗")
+            else:
+                print(f"\n❌ 已取消清空操作")
+        else:
+            print(f"\n⚠️  沒有設定任何暗房區間")
     
     print("\n👋 感謝使用暗房區間設定工具！")
 
