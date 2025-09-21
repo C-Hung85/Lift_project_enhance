@@ -37,12 +37,35 @@ class CorrectionCluster:
     end_index: int                # 群集結束的索引
     pre_zero_index: int           # 群集前的零點索引
     timestamps: List[float]       # 對應的時戳 [pre_zero, start, ..., end]
+    frame_indices: List[int]      # 對應的幀號 [pre_zero, start, ..., end]
     original_values: List[float]  # 原始位移值 [start, ..., end]
     csv_indices: List[int]        # CSV中的行號 [pre_zero, start, ..., end]
 
 @dataclass
+class ReferenceLine:
+    """參考線段數據結構"""
+    timestamp: float
+    start_pixel_coords: Tuple[int, int]  # 線段起點 (x, y) 在原始影片中的座標
+    end_pixel_coords: Tuple[int, int]    # 線段終點 (x, y) 在原始影片中的座標
+    csv_index: int
+    start_roi_coords: Tuple[int, int]    # 線段起點在ROI中的座標
+    end_roi_coords: Tuple[int, int]      # 線段終點在ROI中的座標
+    
+    @property
+    def y_component(self) -> float:
+        """計算線段的Y分量長度"""
+        return abs(self.end_pixel_coords[1] - self.start_pixel_coords[1])
+    
+    @property 
+    def length(self) -> float:
+        """計算線段總長度"""
+        dx = self.end_pixel_coords[0] - self.start_pixel_coords[0]
+        dy = self.end_pixel_coords[1] - self.start_pixel_coords[1]
+        return (dx**2 + dy**2) ** 0.5
+
+@dataclass
 class ReferencePoint:
-    """參考點數據結構"""
+    """參考點數據結構 (保持向後兼容)"""
     timestamp: float
     pixel_coords: Tuple[int, int]  # (x, y) 在原始影片中的座標
     csv_index: int
@@ -57,6 +80,13 @@ class DataManager:
         self.df = pd.read_csv(csv_path)
         self.scale_factor = scale_config.get(video_name, None)
         
+        # 檢查 'frame_idx' 欄位是否存在以提供向下相容性
+        self.use_frame_indices = 'frame_idx' in self.df.columns
+        if self.use_frame_indices:
+            print("偵測到 'frame_idx' 欄位，將使用幀號進行精確提取。")
+        else:
+            print("⚠️ 警告: CSV 中未找到 'frame_idx' 欄位。將退回使用時間戳進行估算，可能會有偏差。")
+
         if self.scale_factor is None:
             raise ValueError(f"找不到影片 {video_name} 的比例尺配置")
         
@@ -66,7 +96,11 @@ class DataManager:
     def _identify_clusters(self) -> List[CorrectionCluster]:
         """識別所有需要校正的非零值群集"""
         clusters = []
-        displacement_col = self.df.columns[1]  # 第二欄是位移數據
+        # 根據是否存在 frame_idx 欄位來決定 displacement_col 的索引
+        if self.use_frame_indices:
+            displacement_col = self.df.columns[2] # frame_idx, second, displacement
+        else:
+            displacement_col = self.df.columns[1]  # second, displacement
         
         i = 0
         while i < len(self.df):
@@ -90,16 +124,20 @@ class DataManager:
                     i += 1
                 end_idx = i - 1
                 
-                # 建立時戳列表
+                # 建立時戳和幀號列表
                 if has_pre_zero:
                     timestamps = [
-                        self.df.iloc[pre_zero_idx]['second'],  # 前零點時戳
-                        *[self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]  # 群集時戳
+                        self.df.iloc[pre_zero_idx]['second'],
+                        *[self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]
                     ]
+                    frame_indices = [
+                        self.df.iloc[pre_zero_idx]['frame_idx'],
+                        *[self.df.iloc[j]['frame_idx'] for j in range(start_idx, end_idx + 1)]
+                    ] if self.use_frame_indices else []
                     csv_indices = list(range(pre_zero_idx, end_idx + 1))
                 else:
-                    # 沒有前零點，直接使用群集範圍
                     timestamps = [self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]
+                    frame_indices = [self.df.iloc[j]['frame_idx'] for j in range(start_idx, end_idx + 1)] if self.use_frame_indices else []
                     csv_indices = list(range(start_idx, end_idx + 1))
                 
                 # 建立群集
@@ -108,6 +146,7 @@ class DataManager:
                     end_index=end_idx,
                     pre_zero_index=pre_zero_idx,
                     timestamps=timestamps,
+                    frame_indices=frame_indices,
                     original_values=[
                         self.df.iloc[j][displacement_col] for j in range(start_idx, end_idx + 1)
                     ],
@@ -115,7 +154,7 @@ class DataManager:
                 )
                 
                 # 為特殊情況添加標記
-                cluster.has_pre_zero = has_pre_zero
+                setattr(cluster, 'has_pre_zero', has_pre_zero)
                 
                 clusters.append(cluster)
             else:
@@ -133,9 +172,28 @@ class DataManager:
             return self.clusters[index]
         raise IndexError(f"群集索引 {index} 超出範圍")
     
+    def calculate_displacement_from_lines(self, line1: ReferenceLine, line2: ReferenceLine) -> float:
+        """
+        基於兩條參考線段計算實際位移 (mm)
+        
+        Args:
+            line1: 第一條參考線段 (群集前零點)
+            line2: 第二條參考線段 (群集結束點)
+            
+        Returns:
+            實際位移 (mm)，線段伸長為正 (向上移動)
+        """
+        # 計算線段Y分量的差異
+        y_component_diff = line2.y_component - line1.y_component
+        
+        # 轉換為毫米 (scale_factor 代表10mm對應的像素數)
+        displacement_mm = (y_component_diff * 10.0) / self.scale_factor
+        
+        return displacement_mm
+    
     def calculate_displacement(self, point1: ReferencePoint, point2: ReferencePoint) -> float:
         """
-        計算兩個參考點之間的實際位移 (mm)
+        計算兩個參考點之間的實際位移 (mm) - 保持向後兼容
         
         Args:
             point1: 第一個參考點 (群集前零點)
@@ -166,8 +224,8 @@ class DataManager:
         cluster = self.clusters[cluster_index]
         displacement_col = self.df.columns[1]
         
-        # 計算最小位移閾值 (基於比例尺的50%)
-        min_displacement_threshold = (10.0 / self.scale_factor) * 0.5  # 0.5像素對應的mm
+        # 計算最小位移閾值 (基於比例尺的10%)
+        min_displacement_threshold = (10.0 / self.scale_factor) * 0.1  # 0.1像素對應的mm
         
         # 如果測量位移小於閾值，視為雜訊
         if abs(measured_displacement) < min_displacement_threshold:
@@ -240,33 +298,54 @@ class VideoHandler:
         print(f"FPS: {self.fps}, 總幀數: {self.total_frames}")
         if self.rotation_angle != 0:
             print(f"旋轉角度: {self.rotation_angle}°")
-    
-    def get_frame_at_timestamp(self, timestamp: float) -> Optional[np.ndarray]:
-        """
-        獲取指定時戳的影片幀
-        
-        Args:
-            timestamp: 時戳 (秒)
-            
-        Returns:
-            影片幀，如果失敗則返回 None
-        """
-        frame_number = int(timestamp * self.fps)
+
+    def get_frame_at_index(self, frame_number: int) -> Optional[np.ndarray]:
+        """獲取指定幀號的影片幀"""
+        print(f"影片幀提取: 幀號={frame_number}")
         
         if frame_number >= self.total_frames:
+            print(f"錯誤: 幀號 {frame_number} 超出範圍 (總幀數: {self.total_frames})")
             return None
         
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        ret, frame = self.cap.read()
+        success = False
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            actual_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+            print(f"嘗試 {attempt+1}: 設置幀位置 目標={frame_number}, 實際={int(actual_pos)}")
+            
+            if abs(actual_pos - frame_number) < 1:
+                ret, frame = self.cap.read()
+                if ret:
+                    print(f"成功讀取幀 {frame_number} (嘗試 {attempt+1})")
+                    success = True
+                    break
+            
+            print(f"重置 VideoCapture (嘗試 {attempt+1})")
+            self.cap.release()
+            self.cap = cv2.VideoCapture(self.video_path)
         
-        if not ret:
-            return None
+        if not success:
+            print("使用全新 VideoCapture 重試...")
+            temp_cap = cv2.VideoCapture(self.video_path)
+            temp_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = temp_cap.read()
+            temp_cap.release()
+            if not ret:
+                print(f"錯誤: 無法讀取幀 {frame_number}")
+                return None
         
-        # 應用旋轉校正
         if self.rotation_angle != 0:
             frame = rotate_frame(frame, self.rotation_angle)
         
+        print(f"成功提取幀 {frame_number}, 尺寸: {frame.shape}")
         return frame
+
+    def get_frame_at_timestamp(self, timestamp: float) -> Optional[np.ndarray]:
+        """獲取指定時戳的影片幀 (舊版，可能有偏差)"""
+        frame_number = int(timestamp * self.fps)
+        print(f"影片幀提取 (估算): 時戳={timestamp:.3f}s → 幀號={frame_number}")
+        return self.get_frame_at_index(frame_number)
     
     def __del__(self):
         """清理資源"""
@@ -283,9 +362,11 @@ class CorrectionApp:
         
         # 校正狀態
         self.current_cluster_index = 0
-        self.current_phase = "roi_selection"  # roi_selection, precision_marking
-        self.current_point_index = 0  # 0: 第一個點, 1: 第二個點
-        self.reference_points = []  # 儲存當前群集的參考點
+        self.current_phase = "roi_selection"  # roi_selection, line_marking_1, line_marking_2
+        self.current_line_index = 0  # 0: 第一條線段, 1: 第二條線段
+        self.current_point_in_line = 0  # 0: 線段起點, 1: 線段終點
+        self.reference_lines = []  # 儲存當前群集的參考線段
+        self.current_line_points = []  # 儲存當前正在標記的線段點 [(x1,y1), (x2,y2)]
         self.roi_rect = None  # (x, y, width, height)
         self.zoom_factor = 4
         
@@ -345,27 +426,41 @@ class CorrectionApp:
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
         
         # 只在開始新群集時重置狀態
-        if self.current_point_index == 0:
-            self.current_phase = "roi_selection"
-            self.reference_points = []
+        if self.current_phase == "roi_selection":
+            # 新群集開始，重置所有狀態
+            self.reference_lines = []
+            self.current_line_points = []
             self.roi_rect = None
-        else:
-            self.current_phase = "roi_selection"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
         
         # 檢查是否有前零點
         has_pre_zero = getattr(cluster, 'has_pre_zero', True)
         
         # 決定要顯示的時戳
-        if self.current_point_index == 0:
+        if self.current_phase in ["roi_selection", "line_marking_1"]:
             if has_pre_zero:
                 timestamp = cluster.timestamps[0]  # 前零點
-                description = "群集前零點"
+                description = "群集前零點 (第一條線段)"
             else:
                 timestamp = cluster.timestamps[0]  # 群集開始點（第一行就有位移）
                 description = "群集開始點 (檔案開頭)"
-        else:
+        else:  # line_marking_2
             timestamp = cluster.timestamps[-1]  # 群集結束點
-            description = "群集結束點"
+            description = "群集結束點 (第二條線段)"
+            
+        # 添加調試信息
+        print(f"\n=== 時戳調試信息 ===")
+        print(f"當前階段: {self.current_phase}")
+        print(f"群集索引: {cluster.start_index} 到 {cluster.end_index}")
+        print(f"有前零點: {has_pre_zero}")
+        print(f"時戳數組: {cluster.timestamps}")
+        print(f"選中時戳: {timestamp:.6f}s (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
+        print(f"時戳差異: {cluster.timestamps[-1] - cluster.timestamps[0]:.6f}s")
+        if len(cluster.original_values) > 0:
+            print(f"原始位移值: {cluster.original_values}")
+            print(f"位移總和: {sum(abs(v) for v in cluster.original_values):.3f}")
+        print("===================")
         
         # 更新資訊
         total_clusters = self.data_manager.get_total_clusters()
@@ -386,7 +481,7 @@ class CorrectionApp:
         
         # 更新狀態
         if self.current_phase == "roi_selection":
-            if not has_pre_zero and self.current_point_index == 0:
+            if not has_pre_zero:
                 self.status_label.config(text="⚠️ 故障檢測: 檔案開頭即有位移，請檢視畫面後按 [N] 選擇處理方式")
             else:
                 self.status_label.config(text="階段1: 請拖拽選擇包含參考點的ROI區域")
@@ -430,15 +525,16 @@ class CorrectionApp:
         # 儲存圖像在畫布中的位置和尺寸
         self.image_bounds = (x_offset, y_offset, new_width, new_height)
         self.original_frame = frame
+        print(f"[DEBUG] 更新 original_frame，尺寸: {frame.shape}，第一個像素: {frame[0,0]}")
         
     def on_canvas_click(self, event):
         """滑鼠點擊事件"""
         if self.current_phase == "roi_selection":
             self.drag_start = (event.x, event.y)
             
-        elif self.current_phase == "precision_marking":
-            # 精細標記模式
-            self.place_reference_point(event.x, event.y)
+        elif self.current_phase in ["line_marking_1", "line_marking_2"]:
+            # 線段標記模式
+            self.place_line_point(event.x, event.y)
     
     def on_canvas_drag(self, event):
         """滑鼠拖拽事件"""
@@ -500,26 +596,219 @@ class CorrectionApp:
             
             self.roi_rect = (roi_x, roi_y, roi_w, roi_h)
             
-            # 進入精細標記模式
-            self.enter_precision_marking_mode()
+            # 顯示ROI已選擇的提示
+            self.status_label.config(text="ROI已選擇，按 [N] 進入線段標記模式")
             
             self.drag_start = None
     
     def enter_precision_marking_mode(self):
         """進入精細標記模式"""
-        self.current_phase = "precision_marking"
+        # 注意：不要在這裡改變 current_phase，它已經在調用者中設置了
         
         # 提取ROI並放大
         roi_x, roi_y, roi_w, roi_h = self.roi_rect
+        print(f"[DEBUG] 提取ROI: original_frame尺寸={self.original_frame.shape}, ROI=({roi_x},{roi_y},{roi_w},{roi_h})")
+        print(f"[DEBUG] ROI區域第一個像素: {self.original_frame[roi_y,roi_x] if roi_y < self.original_frame.shape[0] and roi_x < self.original_frame.shape[1] else 'out of bounds'}")
         roi_frame = self.original_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
         
         # 放大4倍
         enlarged_roi = cv2.resize(roi_frame, None, fx=self.zoom_factor, fy=self.zoom_factor, interpolation=cv2.INTER_CUBIC)
         
-        self.show_frame(enlarged_roi)
+        # 只顯示放大的ROI，不要更新 original_frame
+        self.display_frame_only(enlarged_roi)
+    
+    def display_frame_only(self, frame: np.ndarray):
+        """只顯示幀而不更新 original_frame"""
+        # 轉換顏色格式
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # 更新狀態
-        self.status_label.config(text="階段2: 請點擊標記參考點位置，完成後按 [N] 確認")
+        # 獲取畫布尺寸
+        self.canvas.update()
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        # 計算縮放比例以適應畫布
+        h, w = frame_rgb.shape[:2]
+        scale_x = canvas_width / w
+        scale_y = canvas_height / h
+        self.display_scale = min(scale_x, scale_y, 1.0)  # 不放大，只縮小
+        
+        # 調整影像大小
+        new_width = int(w * self.display_scale)
+        new_height = int(h * self.display_scale)
+        
+        frame_resized = cv2.resize(frame_rgb, (new_width, new_height))
+        
+        # 轉換為 PIL 圖像然後為 PhotoImage
+        from PIL import Image, ImageTk
+        pil_image = Image.fromarray(frame_resized)
+        self.photo = ImageTk.PhotoImage(pil_image)
+        
+        # 清除畫布並顯示圖像
+        self.canvas.delete("all")
+        
+        # 計算置中位置
+        x_offset = (canvas_width - new_width) // 2
+        y_offset = (canvas_height - new_height) // 2
+        
+        self.canvas.create_image(x_offset, y_offset, anchor=tk.NW, image=self.photo)
+        
+        # 更新圖像邊界但不更新 original_frame
+        self.image_bounds = (x_offset, y_offset, new_width, new_height)
+        print(f"[DEBUG] 只顯示幀，尺寸: {frame.shape}，不更新 original_frame")
+    
+    def place_line_point(self, canvas_x: int, canvas_y: int):
+        """放置線段端點標記"""
+        # 轉換畫布座標到放大後ROI的座標
+        img_x, img_y, img_w, img_h = self.image_bounds
+        
+        if (canvas_x < img_x or canvas_x > img_x + img_w or
+            canvas_y < img_y or canvas_y > img_y + img_h):
+            return  # 點擊在圖像外
+        
+        # 轉換為放大後ROI中的座標
+        roi_local_x = int((canvas_x - img_x) / self.display_scale)
+        roi_local_y = int((canvas_y - img_y) / self.display_scale)
+        
+        # 轉換回原始影像座標
+        roi_x, roi_y, roi_w, roi_h = self.roi_rect
+        original_x = roi_x + (roi_local_x // self.zoom_factor)
+        original_y = roi_y + (roi_local_y // self.zoom_factor)
+        
+        print(f"[DEBUG] 線段點座標轉換:")
+        print(f"  畫布點擊: ({canvas_x}, {canvas_y})")
+        print(f"  圖像邊界: {self.image_bounds}")
+        print(f"  ROI本地: ({roi_local_x}, {roi_local_y})")
+        print(f"  縮放因子: {self.zoom_factor}, 顯示縮放: {self.display_scale}")
+        print(f"  縮放調整: ({roi_local_x // self.zoom_factor}, {roi_local_y // self.zoom_factor})")
+        print(f"  ROI範圍: ({roi_x}, {roi_y}, {roi_w}, {roi_h})")
+        print(f"  最終座標: ({original_x}, {original_y})")
+        
+        # 儲存點座標
+        roi_coords = (roi_local_x // self.zoom_factor, roi_local_y // self.zoom_factor)
+        pixel_coords = (original_x, original_y)
+        
+        if self.current_point_in_line == 0:
+            # 第一個點 - 清除之前的標記並開始新線段
+            self.canvas.delete("line_marker")
+            self.current_line_points = [pixel_coords]
+            
+            # 繪製起點標記
+            self.draw_point_marker(canvas_x, canvas_y, "line_start")
+            
+            self.current_point_in_line = 1
+            self.update_status_message()
+            
+        else:
+            # 第二個點 - 完成線段
+            self.current_line_points.append(pixel_coords)
+            
+            # 繪製終點標記
+            self.draw_point_marker(canvas_x, canvas_y, "line_end")
+            
+            # 繪製連接線
+            start_canvas_coords = self.pixel_to_canvas_coords(self.current_line_points[0])
+            end_canvas_coords = self.pixel_to_canvas_coords(self.current_line_points[1])
+            
+            if start_canvas_coords and end_canvas_coords:
+                self.canvas.create_line(
+                    start_canvas_coords[0], start_canvas_coords[1],
+                    end_canvas_coords[0], end_canvas_coords[1],
+                    fill="lime", width=3, tags="line_marker"
+                )
+            
+            # 儲存完整的線段
+            cluster = self.data_manager.get_cluster(self.current_cluster_index)
+            
+            if self.current_line_index == 0:
+                timestamp = cluster.timestamps[0]
+                csv_index = cluster.csv_indices[0]
+            else:
+                timestamp = cluster.timestamps[-1]
+                csv_index = cluster.csv_indices[-1]
+            
+            line = ReferenceLine(
+                timestamp=timestamp,
+                start_pixel_coords=self.current_line_points[0],
+                end_pixel_coords=self.current_line_points[1],
+                csv_index=csv_index,
+                start_roi_coords=(0, 0),  # 簡化：這裡主要記錄像素座標
+                end_roi_coords=roi_coords
+            )
+            
+            # 儲存或替換線段
+            if self.current_line_index < len(self.reference_lines):
+                self.reference_lines[self.current_line_index] = line
+            else:
+                self.reference_lines.append(line)
+            
+            # 重置線段標記狀態
+            self.current_point_in_line = 0
+            self.current_line_points = []
+            
+            self.update_status_message()
+    
+    def update_status_message(self):
+        """更新狀態提示訊息"""
+        if self.current_phase == "roi_selection":
+            self.status_label.config(text="階段1: 請拖拽選擇 ROI 區域，完成後按 [N] 確認")
+        elif self.current_phase == "line_marking_1":
+            if self.current_point_in_line == 0:
+                self.status_label.config(text="階段2a: 請點擊第一條參考線段的起點")
+            else:
+                self.status_label.config(text="階段2b: 請點擊第一條參考線段的終點，完成後按 [N] 確認")
+        elif self.current_phase == "line_marking_2":
+            if self.current_point_in_line == 0:
+                self.status_label.config(text="階段3a: 請在第二張畫面的相同結構上標記第二條線段的起點")
+            else:
+                self.status_label.config(text="階段3b: 請點擊第二條線段的終點，完成後按 [N] 確認並計算位移")
+            
+    def draw_point_marker(self, canvas_x: int, canvas_y: int, marker_type: str):
+        """繪製點標記"""
+        size = 8
+        color = "lime" if marker_type == "line_start" else "orange"
+        
+        # 繪製小圓點
+        self.canvas.create_oval(
+            canvas_x - size, canvas_y - size,
+            canvas_x + size, canvas_y + size,
+            fill=color, outline="white", width=2, tags="line_marker"
+        )
+        
+        # 繪製小十字
+        cross_size = 4
+        self.canvas.create_line(
+            canvas_x - cross_size, canvas_y,
+            canvas_x + cross_size, canvas_y,
+            fill="white", width=2, tags="line_marker"
+        )
+        self.canvas.create_line(
+            canvas_x, canvas_y - cross_size,
+            canvas_x, canvas_y + cross_size,
+            fill="white", width=2, tags="line_marker"
+        )
+    
+    def pixel_to_canvas_coords(self, pixel_coords: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        """將原始影像像素座標轉換為畫布座標"""
+        if not self.roi_rect or not hasattr(self, 'image_bounds'):
+            return None
+            
+        roi_x, roi_y, roi_w, roi_h = self.roi_rect
+        img_x, img_y, img_w, img_h = self.image_bounds
+        
+        # 轉換為ROI本地座標
+        local_x = pixel_coords[0] - roi_x
+        local_y = pixel_coords[1] - roi_y
+        
+        # 檢查是否在ROI範圍內
+        if local_x < 0 or local_x >= roi_w or local_y < 0 or local_y >= roi_h:
+            return None
+        
+        # 轉換為畫布座標
+        canvas_x = img_x + (local_x * self.zoom_factor * self.display_scale)
+        canvas_y = img_y + (local_y * self.zoom_factor * self.display_scale)
+        
+        return (int(canvas_x), int(canvas_y))
     
     def place_reference_point(self, canvas_x: int, canvas_y: int):
         """放置參考點標記"""
@@ -564,12 +853,9 @@ class CorrectionApp:
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
         has_pre_zero = getattr(cluster, 'has_pre_zero', True)
         
-        if self.current_point_index == 0:
-            timestamp = cluster.timestamps[0]
-            csv_index = cluster.csv_indices[0]
-        else:
-            timestamp = cluster.timestamps[-1]
-            csv_index = cluster.csv_indices[-1]
+        # 默認使用第一個時戳點（向後兼容舊代碼）
+        timestamp = cluster.timestamps[0]
+        csv_index = cluster.csv_indices[0]
         
         reference_point = ReferencePoint(
             timestamp=timestamp,
@@ -578,11 +864,12 @@ class CorrectionApp:
             roi_coords=(roi_local_x, roi_local_y)
         )
         
-        # 更新或添加參考點
-        if len(self.reference_points) <= self.current_point_index:
-            self.reference_points.append(reference_point)
-        else:
-            self.reference_points[self.current_point_index] = reference_point
+        # 向後兼容：如果沒有 reference_points 列表，創建一個
+        if not hasattr(self, 'reference_points'):
+            self.reference_points = []
+        
+        # 添加參考點
+        self.reference_points.append(reference_point)
         
         print(f"標記參考點: 時戳={timestamp:.3f}s, 座標=({original_x}, {original_y})")
     
@@ -601,38 +888,81 @@ class CorrectionApp:
     
     def next_step(self):
         """進入下一步"""
-        if self.current_phase == "precision_marking":
-            if len(self.reference_points) <= self.current_point_index:
-                messagebox.showwarning("警告", "請先標記參考點")
+        if self.current_phase == "roi_selection":
+            # ROI選擇完成，進入第一條線段標記
+            if not self.roi_rect or min(self.roi_rect[2:]) < 50:
+                messagebox.showwarning("警告", "請先選擇一個有效的 ROI 區域 (最小 50x50 像素)")
+                return
+            
+            self.current_phase = "line_marking_1"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
+            self.enter_precision_marking_mode()
+            self.update_status_message()
+            
+        elif self.current_phase == "line_marking_1":
+            # 檢查第一條線段是否完成
+            if self.current_point_in_line != 0 or len(self.reference_lines) == 0:
+                messagebox.showwarning("警告", "請先完成第一條線段的標記")
                 return
             
             cluster = self.data_manager.get_cluster(self.current_cluster_index)
             has_pre_zero = getattr(cluster, 'has_pre_zero', True)
             
-            if self.current_point_index == 0:
-                if has_pre_zero:
-                    # 有前零點，移動到第二個點（群集結束點）
-                    self.current_point_index = 1
-                    self.show_current_cluster()
-                else:
-                    # 沒有前零點，可能是故障，提供清零選項
-                    self.handle_first_line_displacement()
-                    return
+            if has_pre_zero:
+                # 有前零點，移動到第二條線段（群集結束點）
+                self.current_phase = "line_marking_2"
+                self.current_line_index = 1
+                self.current_point_in_line = 0
+                self.show_current_cluster()
+                # 進入放大模式標記第二條線段，但保持 original_frame
+                self.enter_precision_marking_mode()
+                self.update_status_message()
             else:
-                # 兩個點都已標記，計算並應用校正
-                self.apply_cluster_correction()
+                # 沒有前零點，可能是故障，提供清零選項
+                self.handle_first_line_displacement()
+                return
                 
-                # 移動到下一個群集
-                self.move_to_next_cluster()
+        elif self.current_phase == "line_marking_2":
+            # 檢查第二條線段是否完成
+            if self.current_point_in_line != 0 or len(self.reference_lines) < 2:
+                messagebox.showwarning("警告", "請先完成第二條線段的標記")
+                return
+            
+            # 兩條線段都已標記，計算並應用校正
+            self.apply_cluster_correction()
+            
+            # 移動到下一個群集
+            self.move_to_next_cluster()
     
     def previous_step(self):
         """返回上一步"""
-        if self.current_point_index > 0:
-            self.current_point_index -= 1
+        if self.current_phase == "line_marking_2":
+            # 從第二條線段回到第一條線段
+            self.current_phase = "line_marking_1"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
+            if len(self.reference_lines) > 1:
+                self.reference_lines.pop()  # 移除第二條線段
+            self.show_current_cluster()
+            self.enter_precision_marking_mode()
+            self.update_status_message()
+        elif self.current_phase == "line_marking_1":
+            # 從第一條線段回到ROI選擇
+            self.current_phase = "roi_selection"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
+            self.reference_lines = []
+            self.roi_rect = None
             self.show_current_cluster()
         elif self.current_cluster_index > 0:
+            # 回到上一個群集
             self.current_cluster_index -= 1
-            self.current_point_index = 1
+            self.current_phase = "roi_selection"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
+            self.reference_lines = []
+            self.roi_rect = None
             self.show_current_cluster()
     
     def handle_first_line_displacement(self):
@@ -687,20 +1017,43 @@ class CorrectionApp:
             self.save_corrections()
             return
         
-        self.current_point_index = 0
+        # 重置狀態為新群集
+        self.current_phase = "roi_selection"
+        self.current_line_index = 0
+        self.current_point_in_line = 0
+        self.reference_lines = []
+        self.current_line_points = []
+        self.roi_rect = None
+        
         self.show_current_cluster()
 
     def apply_cluster_correction(self):
         """應用當前群集的校正"""
-        if len(self.reference_points) < 2:
-            messagebox.showerror("錯誤", "需要兩個參考點才能計算位移")
+        if len(self.reference_lines) < 2:
+            messagebox.showerror("錯誤", "需要兩條參考線段才能計算位移")
             return
         
-        # 計算實際位移
-        point1 = self.reference_points[0]  # 前零點
-        point2 = self.reference_points[1]  # 結束點
+        # 計算實際位移 (基於線段Y分量差異)
+        line1 = self.reference_lines[0]  # 前零點線段
+        line2 = self.reference_lines[1]  # 結束點線段
         
-        measured_displacement = self.data_manager.calculate_displacement(point1, point2)
+        measured_displacement = self.data_manager.calculate_displacement_from_lines(line1, line2)
+        
+        # 顯示線段詳細資訊
+        print(f"\n=== 線段校正計算 ===")
+        print(f"第一條線段:")
+        print(f"  起點: {line1.start_pixel_coords}")
+        print(f"  終點: {line1.end_pixel_coords}")
+        print(f"  Y分量: {line1.y_component:.1f} 像素")
+        print(f"第二條線段:")
+        print(f"  起點: {line2.start_pixel_coords}")
+        print(f"  終點: {line2.end_pixel_coords}")
+        print(f"  Y分量: {line2.y_component:.1f} 像素")
+        print(f"差異計算:")
+        print(f"  Y分量差異: {line2.y_component:.1f} - {line1.y_component:.1f} = {line2.y_component - line1.y_component:.1f} 像素")
+        print(f"  比例尺: {self.data_manager.scale_factor} 像素/10mm")
+        print(f"  計算位移: ({line2.y_component - line1.y_component:.1f} × 10) / {self.data_manager.scale_factor} = {measured_displacement:.3f} mm")
+        print("=====================")
         
         # 應用校正
         cluster = self.data_manager.get_cluster(self.current_cluster_index)

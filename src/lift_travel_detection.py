@@ -228,6 +228,7 @@ def scan(video_path, file_name):
     print(f"💾 儲存 CSV 檔案: {csv_path}")
     
     pd.DataFrame({
+        'frame_idx':result['frame_idx'],
         'second':[round(i/(fps), 3) for i in result['frame_idx']],
         'vertical_travel_distance (mm)':result['v_travel_distance']
     }).to_csv(csv_path, index=False)
