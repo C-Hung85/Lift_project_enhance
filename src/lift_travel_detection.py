@@ -206,6 +206,17 @@ def scan(video_path, file_name):
             display_text = f"travel: {round(travel_distance_sum, 5)} mm"
             text_color = (0, 0, 255) if vertical_travel_distance == 0 else (0, 255, 0)  # 紅色/綠色
         
+        # 顯示 Frame ID (第一行)
+        cv2.putText(
+            frame, 
+            f"Frame: {frame_idx}", 
+            (10, h-110), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            1, 
+            (255, 255, 255),  # 白色
+            2)
+        
+        # 顯示時間和狀態信息 (第二行)
         cv2.putText(
             frame, 
             f"{round(frame_idx/fps, 1)} sec  {display_text}", 
