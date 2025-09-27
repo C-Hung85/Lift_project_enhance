@@ -368,24 +368,35 @@ class DataCleaner:
         frame_indices = []
         times = []
         values = []
-        
+        frame_paths = []  # 新增：儲存 frame_path 欄位
+
         # 讀取數據
         with open(input_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             header = next(reader)  # 讀取標題行
-            
+
             # 檢查是否為新格式（包含frame_idx）
             has_frame_idx = len(header) >= 3 and 'frame' in header[0].lower()
-            
+            # 檢查是否包含 frame_path 欄位
+            has_frame_path = len(header) >= 4
+
             for row in reader:
                 if has_frame_idx and len(row) >= 3:
                     try:
                         frame_idx = int(row[0])
                         time_val = float(row[1])
                         displacement_val = float(row[2])
+
+                        # 處理 frame_path 欄位（如果存在）
+                        if has_frame_path and len(row) >= 4:
+                            frame_path = row[3] if row[3] else ''
+                        else:
+                            frame_path = ''
+
                         frame_indices.append(frame_idx)
                         times.append(time_val)
                         values.append(displacement_val)
+                        frame_paths.append(frame_path)
                     except ValueError:
                         continue
                 elif not has_frame_idx and len(row) >= 2:
@@ -395,6 +406,7 @@ class DataCleaner:
                         frame_indices.append(len(times))  # 使用索引作為frame_idx
                         times.append(time_val)
                         values.append(displacement_val)
+                        frame_paths.append('')  # 舊格式沒有 frame_path
                     except ValueError:
                         continue
         
@@ -405,11 +417,18 @@ class DataCleaner:
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(header)  # 寫入標題行
-            
+
             if has_frame_idx:
-                for frame_idx, time_val, clean_val in zip(frame_indices, times, cleaned_values):
-                    writer.writerow([frame_idx, time_val, clean_val])
+                if has_frame_path:
+                    # 新格式：包含 frame_path 欄位
+                    for frame_idx, time_val, clean_val, frame_path in zip(frame_indices, times, cleaned_values, frame_paths):
+                        writer.writerow([frame_idx, time_val, clean_val, frame_path])
+                else:
+                    # 舊的新格式：只有 frame_idx 但沒有 frame_path
+                    for frame_idx, time_val, clean_val in zip(frame_indices, times, cleaned_values):
+                        writer.writerow([frame_idx, time_val, clean_val])
             else:
+                # 最舊格式：只有時間和位移
                 for time_val, clean_val in zip(times, cleaned_values):
                     writer.writerow([time_val, clean_val])
         

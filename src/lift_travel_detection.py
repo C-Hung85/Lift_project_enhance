@@ -26,6 +26,28 @@ except ImportError:
     darkroom_intervals = {}
 from darkroom_utils import get_darkroom_intervals_for_video, is_in_darkroom_interval
 
+def export_frame_jpg(frame_data, jpg_filename, video_name):
+    """匯出單個幀為JPG"""
+    frame_idx, frame = frame_data
+
+    # 建立匯出目錄路徑
+    export_dir = os.path.join('lifts', 'exported_frames', video_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    export_path = os.path.join(export_dir, jpg_filename)
+
+    # 設定JPG壓縮參數（高品質）
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+
+    # 匯出原始未處理的幀
+    success = cv2.imwrite(export_path, frame, encode_param)
+    if success:
+        print(f"📸 匯出JPG: {jpg_filename} (frame {frame_idx})")
+    else:
+        print(f"❌ 匯出失敗: {jpg_filename}")
+
+    return success
+
 from scale_cache_utils import (
     load_scale_cache, 
     save_scale_cache, 
@@ -45,6 +67,15 @@ cluster = KMeans(n_clusters=2)
 FRAME_INTERVAL = Config['scan_setting']['interval']
 ROI_RATIO = 0.6
 
+# Probe logging controls (avoid spam; configurable via env)
+PROBE_MODE = os.getenv('LIFT_PROBE', '1') == '1'  # 預設開啟，設為 0 可關閉
+PROBE_INTERVAL_FRAMES = int(os.getenv('LIFT_PROBE_INTERVAL', '1000'))
+PROBE_FRAMES = os.getenv('LIFT_PROBE_FRAMES', '6858,6906,9000,20274,58836')
+PROBE_FRAMES_SET = set(int(x) for x in PROBE_FRAMES.split(',') if x.strip().isdigit())
+
+# 可選：鎖定僅處理單一檔名（例如 1.mp4）
+TARGET_VIDEO = os.getenv('LIFT_TARGET')  # 若為 None 則處理全部
+
 # create necessary folders
 for folder_name in ['inspection', 'result']:
     os.makedirs(os.path.join(DATA_FOLDER, 'lifts', folder_name), exist_ok=True)
@@ -59,7 +90,11 @@ def scan(video_path, file_name):
     start_frame = int(video_config.get(file_name, {}).get('start', 0) * fps)
     end_frame = int(video_config.get(file_name, {}).get('end', video_length/fps) * fps)
     roi_ratio = video_config.get(file_name, {}).get('roi_ratio', ROI_RATIO)
-    
+
+    # probe: 基本資訊
+    if PROBE_MODE:
+        print(f"[probe] video={file_name} fps={fps:.6f} total_frames={video_length} start_frame={start_frame} end_frame={end_frame}")
+
     # 取得暗房時間區間設定
     darkroom_intervals_seconds, has_darkroom = get_darkroom_intervals_for_video(file_name, darkroom_intervals)
 
@@ -71,11 +106,19 @@ def scan(video_path, file_name):
     result = {
         'frame':[],
         'frame_idx':[],
-        'keypoints':[], 
+        'keypoints':[],
         'camera_pan':[],
         'v_travel_distance':[],
-        'kp_pair_lines':[]
+        'kp_pair_lines':[],
+        'frame_path':[]     # 新增：對應的匯出圖片路徑標籤
     }
+
+    # 物理群集檢測變數
+    physical_cluster_counter = 0      # 物理群集序號計數器
+    in_physical_cluster = False       # 是否在物理群集中
+    current_cluster_id = None         # 當前物理群集ID
+    frame_cache = []                  # 緩存最近幀：[(frame_idx, frame), ...]
+    pending_pre_export = None         # 待匯出的前0點幀
 
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
@@ -84,18 +127,46 @@ def scan(video_path, file_name):
     vidcap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     while ret:
+        # pre-read probe
         frame_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
+        pre_ms = vidcap.get(cv2.CAP_PROP_POS_MSEC)
+
         ret, frame = vidcap.read()
+        post_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
+        post_ms = vidcap.get(cv2.CAP_PROP_POS_MSEC)
+
+        if PROBE_MODE and (frame_idx % PROBE_INTERVAL_FRAMES == 0 or frame_idx in PROBE_FRAMES_SET):
+            print(f"[probe] pre_idx={frame_idx} pre_ms={pre_ms:.3f}  post_idx={post_idx} post_ms={post_ms:.3f}")
 
         if frame_idx >= end_frame:
             break
 
         if ret and frame_idx % FRAME_INTERVAL == 0:
+            # 提前檢查暗房區間，避免不必要的計算
+            current_time_seconds = frame_idx / fps
+            is_darkroom, darkroom_info = is_in_darkroom_interval(current_time_seconds, darkroom_intervals_seconds)
+
+            if is_darkroom:
+                # 暗房區間：跳過所有運動計算，直接記錄零值結果
+                # 仍需維護幀緩存以便物理群集檢測
+                frame_cache.append((frame_idx, frame.copy()))
+                if len(frame_cache) > 20:
+                    frame_cache.pop(0)
+
+                result['frame'].append(frame)
+                result['frame_idx'].append(frame_idx)
+                result['keypoints'].append([])
+                result['kp_pair_lines'].append([])
+                result['camera_pan'].append(True)  # 標記為類似camera_pan
+                result['v_travel_distance'].append(0)
+                result['frame_path'].append('')  # 暗房區間無匯出圖片
+                continue
+
             # 檢查是否需要旋轉影像
             if file_name in rotation_config:
                 rotation_angle = rotation_config[file_name]
                 frame = rotate_frame(frame, rotation_angle)
-            
+
             keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame, mask)
 
             # default values
@@ -146,31 +217,91 @@ def scan(video_path, file_name):
                     else:
                         vertical_travel_distance = 0
             
-            # 檢查是否在暗房區間內，如果是則忽略運動（類似 camera pan）
-            current_time_seconds = frame_idx / fps
-            is_darkroom, darkroom_info = is_in_darkroom_interval(current_time_seconds, darkroom_intervals_seconds)
-            
-            # 如果在暗房區間內，將運動距離設為 0（忽略）
-            if is_darkroom:
-                vertical_travel_distance = 0
-            
-            result['frame'].append(frame)
-            result['frame_idx'].append(frame_idx)
-            result['keypoints'].append(display_keypoints)
-            result['kp_pair_lines'].append(kp_pair_lines)
-            result['camera_pan'].append(camera_pan or is_darkroom)  # camera_pan 或暗房區間都顯示為 pan
-            # 檢查是否有有效的比例尺資料
+            # 暗房區間檢查已移至前面，此處不再需要
+
+            # 維護幀緩存（保留最近20幀）
+            frame_cache.append((frame_idx, frame.copy()))
+            if len(frame_cache) > 20:
+                frame_cache.pop(0)
+
+            # 檢查是否有有效的比例尺資料（提前計算以便物理群集檢測）
             if file_name in video_scale_dict:
                 scale_factor = video_scale_dict[file_name]
             else:
                 print(f"⚠️  警告: 影片 {file_name} 沒有有效的比例尺資料，使用預設值 1.0")
                 scale_factor = 1.0
-            
-            result['v_travel_distance'].append(vertical_travel_distance * 10 / scale_factor)
+
+            # 物理群集檢測與PNG匯出邏輯
+            frame_path = ''  # 默認空標籤
+
+            # 轉換為毫米的運動距離
+            v_travel_distance_mm = vertical_travel_distance * 10 / scale_factor
+
+            if v_travel_distance_mm != 0 and not in_physical_cluster:
+                # 開始新的物理群集
+                physical_cluster_counter += 1
+                current_cluster_id = physical_cluster_counter
+                in_physical_cluster = True
+
+                # 標記前一幀為前0點（如果有的話）
+                if len(result['frame_path']) > 0:
+                    result['frame_path'][-1] = f'pre_cluster_{current_cluster_id:03d}.jpg'
+                    # 記錄待匯出的前0點
+                    if len(frame_cache) >= 2:
+                        pending_pre_export = (frame_cache[-2], f'pre_cluster_{current_cluster_id:03d}.jpg')
+                else:
+                    # 第一幀就有運動：使用第一幀作為前0點（特殊情況）
+                    print(f"⚠️ 物理群集 {current_cluster_id} 從第一幀開始，使用第一幀作為前0點")
+                    if len(frame_cache) >= 1:
+                        pending_pre_export = (frame_cache[-1], f'pre_cluster_{current_cluster_id:03d}.jpg')
+
+            elif v_travel_distance_mm == 0 and in_physical_cluster:
+                # 物理群集結束，標記當前幀為後0點
+                frame_path = f'post_cluster_{current_cluster_id:03d}.jpg'
+                in_physical_cluster = False
+
+                # 匯出前0點和後0點JPG
+                video_name = os.path.splitext(file_name)[0]
+                if pending_pre_export:
+                    export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
+                    pending_pre_export = None
+
+                export_frame_jpg((frame_idx, frame), frame_path, video_name)
+                current_cluster_id = None
+
+            result['frame'].append(frame)
+            result['frame_idx'].append(frame_idx)
+            result['keypoints'].append(display_keypoints)
+            result['kp_pair_lines'].append(kp_pair_lines)
+            result['camera_pan'].append(camera_pan)  # camera_pan 判斷
+            result['v_travel_distance'].append(v_travel_distance_mm)
+            result['frame_path'].append(frame_path)  # 由物理群集檢測設定的標籤
 
             keypoint_list1 = keypoint_list2
             feature_descrpitor1 = feature_descrpitor2
-    
+
+    # 處理掃描結束時仍在進行中的物理群集
+    if in_physical_cluster:
+        video_name = os.path.splitext(file_name)[0]
+
+        # 匯出前0點（如果有的話）
+        if pending_pre_export:
+            export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
+
+        # 使用最後一幀作為後0點（特殊情況）
+        if len(frame_cache) > 0:
+            last_frame_data = frame_cache[-1]
+            post_jpg_filename = f'post_cluster_{current_cluster_id:03d}.jpg'
+            export_frame_jpg(last_frame_data, post_jpg_filename, video_name)
+
+            # 更新最後一個 frame_path
+            if len(result['frame_path']) > 0:
+                result['frame_path'][-1] = post_jpg_filename
+
+            print(f"⚠️ 物理群集 {current_cluster_id} 在掃描結束時仍未完成，使用最後一幀作為後0點")
+        else:
+            print(f"❌ 物理群集 {current_cluster_id} 在掃描結束時無法找到後0點參考幀")
+
     # post-process the result
     for idx in range(1, len(result['v_travel_distance'])-1):
         if result['v_travel_distance'][idx] != 0 and (result['v_travel_distance'][idx-1]==0 and result['v_travel_distance'][idx+1]==0):
@@ -241,7 +372,8 @@ def scan(video_path, file_name):
     pd.DataFrame({
         'frame_idx':result['frame_idx'],
         'second':[round(i/(fps), 3) for i in result['frame_idx']],
-        'vertical_travel_distance (mm)':result['v_travel_distance']
+        'vertical_travel_distance (mm)':result['v_travel_distance'],
+        'frame_path':result['frame_path']
     }).to_csv(csv_path, index=False)
 
     print(f"complete: {video_path}")
@@ -387,6 +519,8 @@ print(f"\n🎬 開始處理影片...")
 
 for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts','data')):
     for file in files:
+        if TARGET_VIDEO and file != TARGET_VIDEO:
+            continue
         print(f"\n🎥 正在處理影片: {file}")
         scan(os.path.join(root, file), file)
         print(f"✅ 影片處理完成: {file}")

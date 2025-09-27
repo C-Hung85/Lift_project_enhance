@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import json
 from datetime import datetime
+import argparse
 
 # 添加 src 目錄到路徑以導入配置模組
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +31,20 @@ except ImportError:
 
 from rotation_utils import rotate_frame
 
+# --- Helper: optional affine frame mapping (main_frame -> source_frame) ---
+def map_frame_index(main_frame_index: int, intercept: float, slope: float) -> int:
+    """將主程式/CSV 幀號映射為原檔時基幀號。
+
+    Args:
+        main_frame_index: 來自 CSV/inspection 的幀號
+        intercept: 仿射截距（預設建議 318）
+        slope: 仿射斜率（預設建議 0.9946）
+    Returns:
+        以原檔時間軸估計的整數幀號
+    """
+    mapped = intercept + slope * float(main_frame_index)
+    return int(round(mapped))
+
 @dataclass
 class CorrectionCluster:
     """位移校正群集數據結構"""
@@ -40,6 +55,18 @@ class CorrectionCluster:
     frame_indices: List[int]      # 對應的幀號 [pre_zero, start, ..., end]
     original_values: List[float]  # 原始位移值 [start, ..., end]
     csv_indices: List[int]        # CSV中的行號 [pre_zero, start, ..., end]
+
+@dataclass
+class PhysicalCluster:
+    """物理群集數據結構"""
+    cluster_id: int                    # 物理群集序號
+    pre_zero_index: int                # 前0點CSV行號
+    post_zero_index: int               # 後0點CSV行號
+    pre_zero_jpg: str                  # 前0點JPG檔名
+    post_zero_jpg: str                 # 後0點JPG檔名
+    region_values: List[float]         # 區間內的所有位移值
+    is_pure_noise: bool                # 是否為純雜訊群集（區間內全為0）
+    has_real_motion: bool              # 是否包含真實運動
 
 @dataclass
 class ReferenceLine:
@@ -89,9 +116,17 @@ class DataManager:
 
         if self.scale_factor is None:
             raise ValueError(f"找不到影片 {video_name} 的比例尺配置")
-        
-        # 識別所有需要校正的群集
-        self.clusters = self._identify_clusters()
+
+        # 檢查是否有 frame_path 欄位（新的物理群集標籤系統）
+        self.has_frame_path = 'frame_path' in self.df.columns
+        if self.has_frame_path:
+            print("✅ 偵測到 'frame_path' 欄位，使用物理群集標籤系統。")
+            self.physical_clusters = self._identify_physical_clusters_from_png_tags()
+            self.clusters = self._convert_physical_to_correction_clusters()
+        else:
+            print("⚠️ 使用舊版群集識別系統。")
+            self.physical_clusters = []
+            self.clusters = self._identify_clusters()
         
     def _identify_clusters(self) -> List[CorrectionCluster]:
         """識別所有需要校正的非零值群集"""
@@ -161,7 +196,110 @@ class DataManager:
                 i += 1
                 
         return clusters
-    
+
+    def _identify_physical_clusters_from_png_tags(self) -> List[PhysicalCluster]:
+        """基於PNG標籤識別物理群集 - 極其簡化的邏輯"""
+        physical_clusters = []
+
+        # 尋找所有前0點標籤
+        for i, row in self.df.iterrows():
+            frame_path = row.get('frame_path', '')
+
+            if frame_path.startswith('pre_cluster_'):
+                # 提取群集序號
+                cluster_id = int(frame_path.split('_')[2].split('.')[0])
+
+                # 找到對應的後0點
+                post_tag = f'post_cluster_{cluster_id:03d}.jpg'
+                post_rows = self.df[self.df['frame_path'] == post_tag]
+
+                if not post_rows.empty:
+                    pre_zero_index = i
+                    post_zero_index = post_rows.index[0]
+
+                    # 分析區間內的運動值
+                    displacement_col = self.df.columns[2]  # displacement column
+                    region_values = self.df.iloc[pre_zero_index:post_zero_index+1][displacement_col].tolist()
+
+                    # 檢查是否為純雜訊群集
+                    non_zero_values = [v for v in region_values if v != 0]
+                    is_pure_noise = len(non_zero_values) == 0
+                    has_real_motion = not is_pure_noise
+
+                    cluster = PhysicalCluster(
+                        cluster_id=cluster_id,
+                        pre_zero_index=pre_zero_index,
+                        post_zero_index=post_zero_index,
+                        pre_zero_jpg=frame_path,
+                        post_zero_jpg=post_tag,
+                        region_values=region_values,
+                        is_pure_noise=is_pure_noise,
+                        has_real_motion=has_real_motion
+                    )
+
+                    # 只加入有真實運動的群集到校正清單
+                    if has_real_motion:
+                        physical_clusters.append(cluster)
+                        print(f"✅ 識別物理群集 {cluster_id}：包含 {len(non_zero_values)} 個運動點")
+                    else:
+                        print(f"⚠️  跳過純雜訊群集 {cluster_id}：區間內無真實運動")
+
+        print(f"📊 總共識別 {len(physical_clusters)} 個需要校正的物理群集")
+        return physical_clusters
+
+    def _convert_physical_to_correction_clusters(self) -> List[CorrectionCluster]:
+        """將物理群集轉換為校正群集格式（向後兼容）"""
+        correction_clusters = []
+
+        for phys_cluster in self.physical_clusters:
+            # 找到區間內的非零值範圍
+            displacement_col = self.df.columns[2]
+            non_zero_indices = []
+
+            for i in range(phys_cluster.pre_zero_index, phys_cluster.post_zero_index + 1):
+                if self.df.iloc[i][displacement_col] != 0:
+                    non_zero_indices.append(i)
+
+            if not non_zero_indices:
+                continue
+
+            start_idx = min(non_zero_indices)
+            end_idx = max(non_zero_indices)
+
+            # 建立時戳和幀號列表
+            timestamps = [
+                self.df.iloc[phys_cluster.pre_zero_index]['second'],
+                *[self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]
+            ]
+
+            frame_indices = [
+                self.df.iloc[phys_cluster.pre_zero_index]['frame_idx'],
+                *[self.df.iloc[j]['frame_idx'] for j in range(start_idx, end_idx + 1)]
+            ] if self.use_frame_indices else []
+
+            csv_indices = [phys_cluster.pre_zero_index] + list(range(start_idx, end_idx + 1))
+
+            cluster = CorrectionCluster(
+                start_index=start_idx,
+                end_index=end_idx,
+                pre_zero_index=phys_cluster.pre_zero_index,
+                timestamps=timestamps,
+                frame_indices=frame_indices,
+                original_values=[
+                    self.df.iloc[j][displacement_col] for j in range(start_idx, end_idx + 1)
+                ],
+                csv_indices=csv_indices
+            )
+
+            # 添加物理群集資訊
+            setattr(cluster, 'physical_cluster', phys_cluster)
+            setattr(cluster, 'has_pre_zero', True)
+            setattr(cluster, 'post_zero_index', phys_cluster.post_zero_index)
+
+            correction_clusters.append(cluster)
+
+        return correction_clusters
+
     def get_total_clusters(self) -> int:
         """獲取總群集數量"""
         return len(self.clusters)
@@ -213,15 +351,21 @@ class DataManager:
     def apply_correction(self, cluster_index: int, measured_displacement: float) -> bool:
         """
         應用校正到指定群集
-        
+
         Args:
             cluster_index: 群集索引
             measured_displacement: 測量的實際位移 (mm)
-            
+
         Returns:
             是否應用了校正 (如果位移太小視為雜訊則返回 False)
         """
         cluster = self.clusters[cluster_index]
+
+        # 如果是物理群集系統，使用物理群集校正邏輯
+        if self.has_frame_path and hasattr(cluster, 'physical_cluster'):
+            return self.apply_physical_cluster_correction(cluster.physical_cluster, measured_displacement)
+
+        # 舊版群集校正邏輯
         displacement_col = self.df.columns[1]
         
         # 計算最小位移閾值 (基於比例尺的10%)
@@ -261,7 +405,59 @@ class DataManager:
             self.df.iloc[csv_idx, 1] = corrected_val
         
         return True
-    
+
+    def apply_physical_cluster_correction(self, physical_cluster: PhysicalCluster, measured_displacement: float) -> bool:
+        """對整個物理群集區間應用校正"""
+        displacement_col = self.df.columns[2]  # frame_idx, second, displacement, frame_path
+
+        # 計算最小位移閾值
+        min_displacement_threshold = (10.0 / self.scale_factor) * 0.1
+
+        # 如果測量位移小於閾值，視為雜訊
+        if abs(measured_displacement) < min_displacement_threshold:
+            print(f"位移 {measured_displacement:.3f}mm 小於閾值 {min_displacement_threshold:.3f}mm，視為雜訊")
+
+            # 將整個物理群集區間設為零
+            for i in range(physical_cluster.pre_zero_index, physical_cluster.post_zero_index + 1):
+                self.df.iloc[i, 2] = 0.0
+
+            return False
+
+        # 獲取區間內所有非零值的位置和值
+        region_start = physical_cluster.pre_zero_index
+        region_end = physical_cluster.post_zero_index
+
+        non_zero_indices = []
+        non_zero_values = []
+
+        for i in range(region_start, region_end + 1):
+            value = self.df.iloc[i, 2]  # displacement column
+            if value != 0:
+                non_zero_indices.append(i)
+                non_zero_values.append(value)
+
+        if not non_zero_values:
+            print("⚠️  警告：物理群集區間內無非零值")
+            return False
+
+        # 按比例分配校正值
+        total_original = sum(abs(val) for val in non_zero_values)
+        if total_original == 0:
+            return False
+
+        for idx, original_val in zip(non_zero_indices, non_zero_values):
+            ratio = abs(original_val) / total_original
+            corrected_val = measured_displacement * ratio
+
+            # 保持原始正負號
+            if original_val < 0:
+                corrected_val = -corrected_val
+
+            self.df.iloc[idx, 2] = corrected_val
+
+        print(f"✅ 物理群集 {physical_cluster.cluster_id} 校正完成：{len(non_zero_indices)} 個點")
+        return True
+
     def save_corrected_csv(self) -> str:
         """
         儲存校正後的CSV檔案
@@ -375,7 +571,28 @@ class VideoHandler:
         print(f"估算誤差: ±{0.5/self.fps:.6f}s")
         print("=====================")
         return self.get_frame_at_index(frame_number)
-    
+
+    def load_jpg_frame(self, jpg_filename: str) -> Optional[np.ndarray]:
+        """載入匯出的JPG檔案作為參考幀"""
+        video_name = os.path.splitext(self.video_name)[0]
+        jpg_path = os.path.join('lifts', 'exported_frames', video_name, jpg_filename)
+
+        if not os.path.exists(jpg_path):
+            print(f"❌ JPG檔案不存在: {jpg_path}")
+            return None
+
+        frame = cv2.imread(jpg_path)
+        if frame is None:
+            print(f"❌ 無法載入JPG檔案: {jpg_path}")
+            return None
+
+        # 應用旋轉（如果有設定）
+        if self.rotation_angle != 0:
+            frame = rotate_frame(frame, self.rotation_angle)
+
+        print(f"✅ 成功載入JPG: {jpg_filename}")
+        return frame
+
     def __del__(self):
         """清理資源"""
         if hasattr(self, 'cap') and self.cap.isOpened():
@@ -384,10 +601,14 @@ class VideoHandler:
 class CorrectionApp:
     """半自動校正GUI應用程式"""
     
-    def __init__(self, root: tk.Tk, data_manager: DataManager, video_handler: VideoHandler):
+    def __init__(self, root: tk.Tk, data_manager: DataManager, video_handler: VideoHandler,
+                 map_frames_enabled: bool = False, map_intercept: float = 318.0, map_slope: float = 0.9946):
         self.root = root
         self.data_manager = data_manager
         self.video_handler = video_handler
+        self.map_frames_enabled = map_frames_enabled
+        self.map_intercept = map_intercept
+        self.map_slope = map_slope
         
         # 校正狀態
         self.current_cluster_index = 0
@@ -398,6 +619,13 @@ class CorrectionApp:
         self.current_line_points = []  # 儲存當前正在標記的線段點 [(x1,y1), (x2,y2)]
         self.roi_rect = None  # (x, y, width, height)
         self.zoom_factor = 8  # 增加到8倍放大以提高精度
+
+        # 參考線段顯示控制
+        self.show_reference_lines = True  # H鍵可切換
+
+        # 重複標註功能
+        self.line_annotations = [[], []]  # 每條線段的多次標註記錄 [line1_annotations, line2_annotations]
+        self.max_annotations = 3  # 最多保留3次標註
         
         # GUI 組件
         self.setup_ui()
@@ -436,7 +664,7 @@ class CorrectionApp:
         self.status_label = ttk.Label(status_frame, text="", font=("Arial", 9))
         self.status_label.pack(side=tk.LEFT)
         
-        self.help_label = ttk.Label(status_frame, text="快捷鍵: [N]ext [B]ack [S]ave [Q]uit", font=("Arial", 9))
+        self.help_label = ttk.Label(status_frame, text="快捷鍵: [N]ext [B]ack [S]ave [Q]uit [H]ide線段 [R]epeat [Z]取消", font=("Arial", 9))
         self.help_label.pack(side=tk.RIGHT)
         
         # 滑鼠事件變數
@@ -454,7 +682,7 @@ class CorrectionApp:
     def show_current_cluster(self):
         """顯示當前群集的標記點"""
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
-        
+
         # 只在開始新群集時重置狀態
         if self.current_phase == "roi_selection":
             # 新群集開始，重置所有狀態
@@ -463,6 +691,8 @@ class CorrectionApp:
             self.roi_rect = None
             self.current_line_index = 0
             self.current_point_in_line = 0
+            # 重置標註記錄
+            self.line_annotations = [[], []]
         
         # 檢查是否有前零點
         has_pre_zero = getattr(cluster, 'has_pre_zero', True)
@@ -493,6 +723,10 @@ class CorrectionApp:
         print(f"幀號數組: {frame_indices_int}")
         print(f"選中時戳: {timestamp:.6f}s (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
         print(f"選中幀號: {frame_id} (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
+        mapped_frame_id = None
+        if self.map_frames_enabled and frame_id is not None and self.data_manager.use_frame_indices:
+            mapped_frame_id = map_frame_index(frame_id, self.map_intercept, self.map_slope)
+            print(f"➡️  映射後幀號: {mapped_frame_id}  (公式: {self.map_intercept} + {self.map_slope} × {frame_id})")
         print(f"時戳差異: {cluster.timestamps[-1] - cluster.timestamps[0]:.6f}s")
         if cluster.frame_indices and len(cluster.frame_indices) > 1:
             print(f"幀號差異: {int(cluster.frame_indices[-1]) - int(cluster.frame_indices[0])} 幀")
@@ -505,14 +739,27 @@ class CorrectionApp:
             print(f"💡 提示: 在標記時請注意這個預期的像素移動量")
         print("=========================")
         
-        # 更新資訊（包含幀號）
+        # 更新資訊（包含幀號和物理群集資訊）
         total_clusters = self.data_manager.get_total_clusters()
         cluster_info = f"檔案: {self.video_handler.video_name} | "
-        cluster_info += f"群集: {self.current_cluster_index + 1}/{total_clusters} | "
-        cluster_info += f"時戳: {timestamp:.3f}s"
-        if frame_id is not None:
-            cluster_info += f" | 幀號: {frame_id}"
-        cluster_info += f" | {description}"
+
+        # 如果使用物理群集系統，顯示物理群集資訊
+        if self.data_manager.has_frame_path and hasattr(cluster, 'physical_cluster'):
+            physical_cluster = cluster.physical_cluster
+            cluster_info += f"物理群集: {self.current_cluster_index + 1}/{total_clusters} | "
+            cluster_info += f"ID: {physical_cluster.cluster_id} | {description}"
+            cluster_info += f" | 運動點數: {len([v for v in physical_cluster.region_values if v != 0])}"
+            if used_jpg:
+                cluster_info += " | 使用JPG"
+        else:
+            cluster_info += f"群集: {self.current_cluster_index + 1}/{total_clusters} | "
+            cluster_info += f"時戳: {timestamp:.3f}s"
+            if frame_id is not None:
+                if mapped_frame_id is not None:
+                    cluster_info += f" | 幀號: {frame_id} → {mapped_frame_id}"
+                else:
+                    cluster_info += f" | 幀號: {frame_id}"
+            cluster_info += f" | {description}"
         
         self.info_label.config(text=cluster_info)
         
@@ -520,17 +767,47 @@ class CorrectionApp:
         window_title = f"半自動位移校正工具 - {self.video_handler.video_name}"
         window_title += f" | 群集 {self.current_cluster_index + 1}/{total_clusters}"
         if frame_id is not None:
-            window_title += f" | 幀號: {frame_id}"
+            if mapped_frame_id is not None:
+                window_title += f" | 幀號: {frame_id}→{mapped_frame_id}"
+            else:
+                window_title += f" | 幀號: {frame_id}"
         window_title += f" | 時戳: {timestamp:.3f}s"
         self.root.title(window_title)
         
-        # 顯示影片幀（優先使用幀號進行精確定位）
-        if frame_id is not None and self.data_manager.use_frame_indices:
-            frame = self.video_handler.get_frame_at_index(frame_id)
-            print(f"使用幀號 {frame_id} 進行精確定位")
-        else:
-            frame = self.video_handler.get_frame_at_timestamp(timestamp)
-            print(f"退回使用時戳 {timestamp:.3f}s 進行估算定位")
+        # 優先使用JPG檔案（物理群集系統）
+        frame = None
+        used_jpg = False
+
+        if self.data_manager.has_frame_path and hasattr(cluster, 'physical_cluster'):
+            physical_cluster = cluster.physical_cluster
+
+            if self.current_phase in ["roi_selection", "line_marking_1"]:
+                # 第一條線段：前0點
+                jpg_filename = physical_cluster.pre_zero_jpg
+                frame = self.video_handler.load_jpg_frame(jpg_filename)
+                if frame is not None:
+                    used_jpg = True
+                    print(f"✅ 使用前0點JPG: {jpg_filename}")
+                    description = f"物理群集 {physical_cluster.cluster_id} 前0點 (運動前狀態)"
+
+            elif self.current_phase == "line_marking_2":
+                # 第二條線段：後0點
+                jpg_filename = physical_cluster.post_zero_jpg
+                frame = self.video_handler.load_jpg_frame(jpg_filename)
+                if frame is not None:
+                    used_jpg = True
+                    print(f"✅ 使用後0點JPG: {jpg_filename}")
+                    description = f"物理群集 {physical_cluster.cluster_id} 後0點 (運動後狀態)"
+
+        # 回退到影片幀載入（如果JPG不可用）
+        if frame is None:
+            if frame_id is not None and self.data_manager.use_frame_indices:
+                target_frame_id = mapped_frame_id if mapped_frame_id is not None else frame_id
+                frame = self.video_handler.get_frame_at_index(target_frame_id)
+                print(f"🔄 回退使用影片幀號 {frame_id} 進行定位")
+            else:
+                frame = self.video_handler.get_frame_at_timestamp(timestamp)
+                print(f"🔄 回退使用時戳 {timestamp:.3f}s 進行估算定位")
             
         if frame is None:
             error_msg = f"無法獲取"
@@ -693,32 +970,40 @@ class CorrectionApp:
     
     def redraw_existing_lines(self):
         """重新繪製已標記的線段"""
+        # 清除之前的參考線段
+        self.canvas.delete("existing_line")
+
+        # 只有在顯示模式開啟時才繪製
+        if not self.show_reference_lines:
+            return
+
         for i, line in enumerate(self.reference_lines):
             start_canvas_coords = self.pixel_to_canvas_coords(line.start_pixel_coords)
             end_canvas_coords = self.pixel_to_canvas_coords(line.end_pixel_coords)
-            
+
             if start_canvas_coords and end_canvas_coords:
-                # 使用不同顏色區分第一條和第二條線段
+                # 使用不同顏色區分第一條和第二條線段，降低線寬
                 color = "cyan" if i == 0 else "yellow"
-                line_width = 4
-                
+                line_width = 2  # 從4降低到2
+                point_size = 3  # 從6降低到3
+
                 # 繪製線段
                 self.canvas.create_line(
                     start_canvas_coords[0], start_canvas_coords[1],
                     end_canvas_coords[0], end_canvas_coords[1],
                     fill=color, width=line_width, tags="existing_line"
                 )
-                
-                # 繪製端點
+
+                # 繪製端點（縮小尺寸）
                 self.canvas.create_oval(
-                    start_canvas_coords[0] - 6, start_canvas_coords[1] - 6,
-                    start_canvas_coords[0] + 6, start_canvas_coords[1] + 6,
-                    fill=color, outline="white", width=2, tags="existing_line"
+                    start_canvas_coords[0] - point_size, start_canvas_coords[1] - point_size,
+                    start_canvas_coords[0] + point_size, start_canvas_coords[1] + point_size,
+                    fill=color, outline="white", width=1, tags="existing_line"
                 )
                 self.canvas.create_oval(
-                    end_canvas_coords[0] - 6, end_canvas_coords[1] - 6,
-                    end_canvas_coords[0] + 6, end_canvas_coords[1] + 6,
-                    fill=color, outline="white", width=2, tags="existing_line"
+                    end_canvas_coords[0] - point_size, end_canvas_coords[1] - point_size,
+                    end_canvas_coords[0] + point_size, end_canvas_coords[1] + point_size,
+                    fill=color, outline="white", width=1, tags="existing_line"
                 )
     
     def display_frame_only(self, frame: np.ndarray):
@@ -821,16 +1106,16 @@ class CorrectionApp:
                     fill="lime", width=6, tags="line_marker"  # 增加線寬
                 )
             
-            # 儲存完整的線段
+            # 儲存完整的線段標註
             cluster = self.data_manager.get_cluster(self.current_cluster_index)
-            
+
             if self.current_line_index == 0:
                 timestamp = cluster.timestamps[0]
                 csv_index = cluster.csv_indices[0]
             else:
                 timestamp = cluster.timestamps[-1]
                 csv_index = cluster.csv_indices[-1]
-            
+
             line = ReferenceLine(
                 timestamp=timestamp,
                 start_pixel_coords=self.current_line_points[0],
@@ -839,33 +1124,41 @@ class CorrectionApp:
                 start_roi_coords=(0, 0),  # 簡化：這裡主要記錄像素座標
                 end_roi_coords=roi_coords
             )
-            
-            # 儲存或替換線段
-            if self.current_line_index < len(self.reference_lines):
-                self.reference_lines[self.current_line_index] = line
-            else:
-                self.reference_lines.append(line)
-            
+
+            # 將標註添加到記錄中（支援多次標註）
+            self.add_line_annotation(line)
+
             # 重置線段標記狀態
             self.current_point_in_line = 0
             self.current_line_points = []
-            
+
             self.update_status_message()
     
     def update_status_message(self):
         """更新狀態提示訊息"""
+        base_message = ""
+
         if self.current_phase == "roi_selection":
-            self.status_label.config(text="階段1: 請拖拽選擇 ROI 區域，完成後按 [N] 確認")
+            base_message = "階段1: 請拖拽選擇 ROI 區域，完成後按 [N] 確認"
         elif self.current_phase == "line_marking_1":
+            line1_count = len(self.line_annotations[0])
             if self.current_point_in_line == 0:
-                self.status_label.config(text="階段2a: 8倍放大精細標記 - 請點擊第一條參考線段的起點")
+                base_message = f"階段2a: 8倍放大精細標記 - 請點擊第一條參考線段的起點 [已標註: {line1_count}/3]"
             else:
-                self.status_label.config(text="階段2b: 請點擊第一條參考線段的終點，完成後按 [N] 確認")
+                base_message = f"階段2b: 請點擊第一條參考線段的終點 [已標註: {line1_count}/3]"
         elif self.current_phase == "line_marking_2":
+            line1_count = len(self.line_annotations[0])
+            line2_count = len(self.line_annotations[1])
             if self.current_point_in_line == 0:
-                self.status_label.config(text="階段3a: 8倍放大對比標記 - 青色線為第一條線段，請標記第二條線段起點")
+                base_message = f"階段3a: 8倍放大對比標記 - 青色線為第一條線段[{line1_count}/3]，請標記第二條線段起點 [{line2_count}/3]"
             else:
-                self.status_label.config(text="階段3b: 請點擊第二條線段終點，完成後按 [N] 確認並計算位移")
+                base_message = f"階段3b: 請點擊第二條線段終點 [{line2_count}/3]"
+
+        # 添加參考線段狀態
+        reference_status = "顯示" if self.show_reference_lines else "隱藏"
+        final_message = f"{base_message} | 參考線段: {reference_status}"
+
+        self.status_label.config(text=final_message)
             
     def draw_point_marker(self, canvas_x: int, canvas_y: int, marker_type: str):
         """繪製點標記"""
@@ -989,6 +1282,12 @@ class CorrectionApp:
             self.save_corrections()
         elif key == 'q':  # Quit
             self.quit_application()
+        elif key == 'h':  # Hide/Show reference lines
+            self.toggle_reference_lines()
+        elif key == 'r':  # Repeat annotation
+            self.repeat_annotation()
+        elif key == 'z':  # Cancel last annotation
+            self.cancel_last_annotation()
     
     def next_step(self):
         """進入下一步"""
@@ -1006,9 +1305,23 @@ class CorrectionApp:
             
         elif self.current_phase == "line_marking_1":
             # 檢查第一條線段是否完成
-            if self.current_point_in_line != 0 or len(self.reference_lines) == 0:
-                messagebox.showwarning("警告", "請先完成第一條線段的標記")
+            if self.current_point_in_line != 0:
+                messagebox.showwarning("警告", "請先完成當前線段的標記")
                 return
+
+            line1_count = len(self.line_annotations[0])
+            if line1_count == 0:
+                messagebox.showwarning("警告", "請先標註第一條線段")
+                return
+            elif line1_count < 3:
+                result = messagebox.askyesno(
+                    "標註數量不足",
+                    f"第一條線段只有 {line1_count} 次標註（建議 3 次）\n\n"
+                    f"是否繼續到第二條線段？\n\n"
+                    f"點擊「否」可使用 [R] 鍵繼續標註。"
+                )
+                if not result:
+                    return
             
             cluster = self.data_manager.get_cluster(self.current_cluster_index)
             has_pre_zero = getattr(cluster, 'has_pre_zero', True)
@@ -1031,9 +1344,23 @@ class CorrectionApp:
                 
         elif self.current_phase == "line_marking_2":
             # 檢查第二條線段是否完成
-            if self.current_point_in_line != 0 or len(self.reference_lines) < 2:
-                messagebox.showwarning("警告", "請先完成第二條線段的標記")
+            if self.current_point_in_line != 0:
+                messagebox.showwarning("警告", "請先完成當前線段的標記")
                 return
+
+            line2_count = len(self.line_annotations[1])
+            if line2_count == 0:
+                messagebox.showwarning("警告", "請先標註第二條線段")
+                return
+            elif line2_count < 3:
+                result = messagebox.askyesno(
+                    "標註數量不足",
+                    f"第二條線段只有 {line2_count} 次標註（建議 3 次）\n\n"
+                    f"是否繼續計算位移？\n\n"
+                    f"點擊「否」可使用 [R] 鍵繼續標註。"
+                )
+                if not result:
+                    return
             
             # 兩條線段都已標記，計算並應用校正
             self.apply_cluster_correction()
@@ -1048,8 +1375,9 @@ class CorrectionApp:
             self.current_phase = "line_marking_1"
             self.current_line_index = 0
             self.current_point_in_line = 0
-            if len(self.reference_lines) > 1:
-                self.reference_lines.pop()  # 移除第二條線段
+            # 清空第二條線段的標註記錄
+            self.line_annotations[1] = []
+            self.update_reference_lines_from_annotations()
             self.show_current_cluster()
             self.enter_precision_marking_mode()
             self.update_status_message()
@@ -1059,6 +1387,7 @@ class CorrectionApp:
             self.current_line_index = 0
             self.current_point_in_line = 0
             self.reference_lines = []
+            self.line_annotations = [[], []]  # 清空所有標註記錄
             self.roi_rect = None
             self.show_current_cluster()
         elif self.current_cluster_index > 0:
@@ -1068,6 +1397,7 @@ class CorrectionApp:
             self.current_line_index = 0
             self.current_point_in_line = 0
             self.reference_lines = []
+            self.line_annotations = [[], []]  # 清空所有標註記錄
             self.roi_rect = None
             self.show_current_cluster()
     
@@ -1130,6 +1460,8 @@ class CorrectionApp:
         self.reference_lines = []
         self.current_line_points = []
         self.roi_rect = None
+        # 重置標註記錄
+        self.line_annotations = [[], []]
         
         self.show_current_cluster()
 
@@ -1144,7 +1476,7 @@ class CorrectionApp:
         line2 = self.reference_lines[1]  # 結束點線段
         
         measured_displacement = self.data_manager.calculate_displacement_from_lines(line1, line2)
-        
+
         # 顯示線段詳細資訊（包含幀號）
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
         print(f"\n=== 線段校正計算 ===")
@@ -1165,11 +1497,27 @@ class CorrectionApp:
         print(f"  比例尺: {self.data_manager.scale_factor} 像素/10mm")
         print(f"  計算位移: ({line2.y_component - line1.y_component:.1f} × 10) / {self.data_manager.scale_factor} = {measured_displacement:.3f} mm")
         print("=====================")
-        
+
+        # 計算程式原始估計值
+        original_displacement = sum(abs(v) for v in cluster.original_values)
+
+        # 位移比較警示
+        if abs(measured_displacement) < original_displacement * 0.95:  # 人工測量值小於程式估計值的95%
+            choice = self.show_displacement_warning(measured_displacement, original_displacement)
+
+            if choice == "use_original":
+                # 使用程式估計值
+                measured_displacement = original_displacement
+                print(f"用戶選擇使用程式估計值: {measured_displacement:.3f}mm")
+            elif choice == "re_annotate":
+                # 重新標註
+                print("用戶選擇重新標註")
+                return  # 不應用校正，留在當前階段
+            # else: choice == "use_manual" - 使用人工測量值，繼續執行
+
         # 應用校正
-        cluster = self.data_manager.get_cluster(self.current_cluster_index)
         is_applied = self.data_manager.apply_correction(self.current_cluster_index, measured_displacement)
-        
+
         if is_applied:
             print(f"群集 {self.current_cluster_index + 1} 校正完成，測量位移: {measured_displacement:.3f}mm")
         else:
@@ -1183,6 +1531,213 @@ class CorrectionApp:
         except Exception as e:
             messagebox.showerror("儲存失敗", f"無法儲存檔案: {str(e)}")
     
+    def toggle_reference_lines(self):
+        """切換參考線段的顯示/隱藏"""
+        self.show_reference_lines = not self.show_reference_lines
+        status = "顯示" if self.show_reference_lines else "隱藏"
+        print(f"參考線段已{status}")
+
+        # 重新繪製線段（或清除）
+        self.redraw_existing_lines()
+
+        # 更新狀態訊息
+        self.update_status_message()
+
+    def repeat_annotation(self):
+        """重複標註當前線段"""
+        if self.current_phase not in ["line_marking_1", "line_marking_2"]:
+            print("只能在線段標記模式下重複標註")
+            return
+
+        if self.current_point_in_line != 0:
+            print("請先完成當前線段的標記")
+            return
+
+        # 重新開始標記當前線段
+        self.current_point_in_line = 0
+        self.current_line_points = []
+
+        # 清除當前標記
+        self.canvas.delete("line_marker")
+
+        print(f"開始重複標註線段 {self.current_line_index + 1}")
+        self.update_status_message()
+
+    def cancel_last_annotation(self):
+        """取消最後一次標註（不納入記錄）"""
+        if self.current_phase not in ["line_marking_1", "line_marking_2"]:
+            print("只能在線段標記模式下取消標註")
+            return
+
+        # 如果當前線段有標註記錄，移除最後一次
+        if len(self.line_annotations[self.current_line_index]) > 0:
+            removed_annotation = self.line_annotations[self.current_line_index].pop()
+            print(f"已取消線段 {self.current_line_index + 1} 的最後一次標註")
+
+            # 更新 reference_lines 顯示
+            self.update_reference_lines_from_annotations()
+
+            # 重新繪製
+            self.redraw_existing_lines()
+        else:
+            print(f"線段 {self.current_line_index + 1} 沒有可取消的標註")
+
+        self.update_status_message()
+
+    def add_line_annotation(self, line: ReferenceLine):
+        """添加線段標註到記錄中，支援自動剔除離群的標註"""
+        current_annotations = self.line_annotations[self.current_line_index]
+
+        # 添加新標註
+        current_annotations.append(line)
+
+        # 如果超過3次，剔除離平均最遠的那個
+        if len(current_annotations) > self.max_annotations:
+            self.remove_outlier_annotation()
+
+        # 更新顯示的參考線段（使用平均值）
+        self.update_reference_lines_from_annotations()
+
+        print(f"線段 {self.current_line_index + 1} 已標註 {len(current_annotations)} 次")
+
+    def remove_outlier_annotation(self):
+        """剔除離平均值最遠的標註"""
+        current_annotations = self.line_annotations[self.current_line_index]
+
+        if len(current_annotations) <= self.max_annotations:
+            return
+
+        # 計算每個標註的Y分量
+        y_components = [line.y_component for line in current_annotations]
+
+        # 計算平均值
+        mean_y = sum(y_components) / len(y_components)
+
+        # 找到離平均最遠的索引
+        max_distance = 0
+        outlier_index = 0
+
+        for i, y_comp in enumerate(y_components):
+            distance = abs(y_comp - mean_y)
+            if distance > max_distance:
+                max_distance = distance
+                outlier_index = i
+
+        # 剔除離群值
+        removed_annotation = current_annotations.pop(outlier_index)
+        print(f"已剔除離群標註（Y分量: {removed_annotation.y_component:.1f}，距離平均: {max_distance:.1f}）")
+
+    def update_reference_lines_from_annotations(self):
+        """從標註記錄更新參考線段顯示（使用平均值）"""
+        for line_idx in range(2):  # 兩條線段
+            annotations = self.line_annotations[line_idx]
+
+            if not annotations:
+                # 沒有標註，移除對應的參考線段
+                if line_idx < len(self.reference_lines):
+                    self.reference_lines.pop(line_idx)
+                continue
+
+            # 計算平均線段
+            avg_line = self.calculate_average_line(annotations)
+
+            # 更新或添加到 reference_lines
+            if line_idx < len(self.reference_lines):
+                self.reference_lines[line_idx] = avg_line
+            else:
+                self.reference_lines.append(avg_line)
+
+    def calculate_average_line(self, annotations: List[ReferenceLine]) -> ReferenceLine:
+        """計算多次標註的平均線段"""
+        if not annotations:
+            raise ValueError("沒有標註可以計算平均")
+
+        # 計算平均座標
+        avg_start_x = sum(line.start_pixel_coords[0] for line in annotations) / len(annotations)
+        avg_start_y = sum(line.start_pixel_coords[1] for line in annotations) / len(annotations)
+        avg_end_x = sum(line.end_pixel_coords[0] for line in annotations) / len(annotations)
+        avg_end_y = sum(line.end_pixel_coords[1] for line in annotations) / len(annotations)
+
+        # 使用第一個標註的其他屬性
+        first_annotation = annotations[0]
+
+        return ReferenceLine(
+            timestamp=first_annotation.timestamp,
+            start_pixel_coords=(int(avg_start_x), int(avg_start_y)),
+            end_pixel_coords=(int(avg_end_x), int(avg_end_y)),
+            csv_index=first_annotation.csv_index,
+            start_roi_coords=first_annotation.start_roi_coords,
+            end_roi_coords=first_annotation.end_roi_coords
+        )
+
+    def show_displacement_warning(self, measured_displacement: float, original_displacement: float) -> str:
+        """顯示位移比較警示對話框"""
+        from tkinter import simpledialog
+
+        # 創建自定義對話框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("位移比較警示")
+        dialog.geometry("500x350")
+        dialog.modal = True
+        dialog.grab_set()
+
+        # 置中顯示
+        dialog.transient(self.root)
+        x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (350 // 2)
+        dialog.geometry(f"500x350+{x}+{y}")
+
+        # 警示文字
+        warning_frame = ttk.Frame(dialog)
+        warning_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        title_label = ttk.Label(warning_frame, text="⚠️ 位移測量警示", font=("Arial", 14, "bold"))
+        title_label.pack(pady=(0, 10))
+
+        info_text = f"""人工測量值明顯小於程式估計值：
+
+• 人工測量值： {abs(measured_displacement):.3f} mm
+• 程式估計值： {original_displacement:.3f} mm
+• 差異比例： {(abs(measured_displacement) / original_displacement * 100):.1f}%
+
+這可能表示：
+1. 標註精度可能不足
+2. 程式估計值可能更接近真實值
+3. 圖像特徵可能不明顯
+
+請選擇處理方式："""
+
+        info_label = ttk.Label(warning_frame, text=info_text, justify=tk.LEFT)
+        info_label.pack(pady=(0, 20))
+
+        # 結果變數
+        result = {"choice": None}
+
+        # 按鈕框架
+        button_frame = ttk.Frame(warning_frame)
+        button_frame.pack(fill=tk.X)
+
+        def on_use_original():
+            result["choice"] = "use_original"
+            dialog.destroy()
+
+        def on_re_annotate():
+            result["choice"] = "re_annotate"
+            dialog.destroy()
+
+        def on_use_manual():
+            result["choice"] = "use_manual"
+            dialog.destroy()
+
+        ttk.Button(button_frame, text="使用程式估計值", command=on_use_original).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="重新標註", command=on_re_annotate).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="使用人工校正值", command=on_use_manual).pack(side=tk.LEFT)
+
+        # 等待用戶選擇
+        dialog.wait_window()
+
+        return result["choice"] or "use_manual"  # 預設使用人工值
+
     def quit_application(self):
         """退出應用程式"""
         if messagebox.askokcancel("確認退出", "是否要退出校正工具？\n未儲存的更改將丟失。"):
@@ -1190,7 +1745,13 @@ class CorrectionApp:
 
 def main():
     """主函數 - 選擇檔案並啟動校正工具"""
-    
+    # 參數：可選啟用幀映射（仿射）
+    parser = argparse.ArgumentParser(description="半自動位移校正工具")
+    parser.add_argument("--map-frames", action="store_true", help="啟用 CSV 幀→原檔幀的仿射映射")
+    parser.add_argument("--map-intercept", type=float, default=318.0, help="幀映射截距，預設 318")
+    parser.add_argument("--map-slope", type=float, default=0.9946, help="幀映射斜率，預設 0.9946")
+    args, _ = parser.parse_known_args()
+
     # 建立根視窗但隱藏
     root = tk.Tk()
     root.withdraw()
@@ -1238,7 +1799,14 @@ def main():
         video_handler = VideoHandler(str(video_path))
         
         # 啟動校正界面
-        app = CorrectionApp(root, data_manager, video_handler)
+        app = CorrectionApp(
+            root,
+            data_manager,
+            video_handler,
+            map_frames_enabled=args.map_frames,
+            map_intercept=args.map_intercept,
+            map_slope=args.map_slope,
+        )
         app.start_correction()
         root.mainloop()
         
