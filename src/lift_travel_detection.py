@@ -26,6 +26,22 @@ except ImportError:
     darkroom_intervals = {}
 from darkroom_utils import get_darkroom_intervals_for_video, is_in_darkroom_interval
 
+def export_frame_jpg(frame_data, jpg_filename, video_name):
+    """匯出單個幀為JPG（於 exported_frames/<video_name>/ 下）"""
+    frame_idx, frame = frame_data
+
+    export_dir = os.path.join('lifts', 'exported_frames', video_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    export_path = os.path.join(export_dir, jpg_filename)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+    success = cv2.imwrite(export_path, frame, encode_param)
+    if success:
+        print(f"📸 匯出JPG: {jpg_filename} (frame {frame_idx})")
+    else:
+        print(f"❌ 匯出失敗: {jpg_filename}")
+    return success
+
 from scale_cache_utils import (
     load_scale_cache, 
     save_scale_cache, 
@@ -41,9 +57,17 @@ warnings.filterwarnings('ignore')
 DATA_FOLDER = Config['files']['data_folder']
 feature_detector = cv2.ORB.create(nfeatures=100)
 feature_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
-cluster = KMeans(n_clusters=2)
+cluster = KMeans(n_clusters=2, random_state=0)
 FRAME_INTERVAL = Config['scan_setting']['interval']
 ROI_RATIO = 0.6
+# 檢測參數（像素域）
+EFFECT_MIN_PX = 1.0
+PAIR_TOLERANCE_PX = 1.0
+JITTER_MAX_PX = 1.0
+EXIT_ZERO_LEN = 3
+REVERSAL_PERSIST_R = 2
+MIN_MATCHES = 6
+
 
 # create necessary folders
 for folder_name in ['inspection', 'result']:
@@ -74,14 +98,37 @@ def scan(video_path, file_name):
         'keypoints':[], 
         'camera_pan':[],
         'v_travel_distance':[],
-        'kp_pair_lines':[]
+        'kp_pair_lines':[],
+        'frame_path':[],
+        # 腳手架：之後將填入真正的群集資訊；此階段先固定為 0/空字串
+        'cluster_id':[],      # 群外為 0
+        'orientation':[],     # -1/0/+1；群外 0
+        'darkroom_event':[]   # 'enter_darkroom' / 'exit_darkroom' / ''
     }
+
+    # 狀態機變數（群集與抖動處理，入群延遲一幀）
+    state = 'Idle'  # Idle / PendingEnter / InCluster
+    pending_idx = None
+    pending_delta_px = None
+    pending_result_idx = None
+    current_cluster_id = 0
+    physical_cluster_counter = 0
+    orientation_current = 0
+    zero_streak = 0
+    reversal_streak = 0
+    # 匯出/快取變數
+    frame_cache = []                    # 最近處理幀 (frame_idx, frame)
+    pending_pre_export = None           # (frame_data, jpg_filename)
+    last_non_darkroom_frame = None      # (frame_idx, frame)
+    video_name = os.path.splitext(file_name)[0]
 
     # detect keypoints
     keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
 
     # set video to the start point
     vidcap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    prev_is_darkroom = False
 
     while ret:
         frame_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -124,7 +171,7 @@ def scan(video_path, file_name):
                 paired_keypoints_info_array = np.array(paired_keypoints_info_array)
                 paired_keypoints_info_array = paired_keypoints_info_array[utils.remove_outlier_idx(paired_keypoints_info_array[:, 2], 'upper')]
 
-                if paired_keypoints_info_array.shape[0] > 1:
+                if paired_keypoints_info_array.shape[0] >= MIN_MATCHES:
                     
                     display_keypoints = [keypoint_list2[kp2_idx] for kp2_idx in paired_keypoints_info_array[:, 0].astype(int)]
                     kp_pair_lines = [(np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int)) \
@@ -153,7 +200,155 @@ def scan(video_path, file_name):
             # 如果在暗房區間內，將運動距離設為 0（忽略）
             if is_darkroom:
                 vertical_travel_distance = 0
+
+            # 暗房事件（僅記錄進出，不改變顯示文字行為）
+            if is_darkroom and not prev_is_darkroom:
+                darkroom_event = 'enter_darkroom'
+            elif (not is_darkroom) and prev_is_darkroom:
+                darkroom_event = 'exit_darkroom'
+            else:
+                darkroom_event = ''
             
+            # 狀態機計算（以像素域判斷候選）
+            delta_px = vertical_travel_distance
+            is_candidate = (not camera_pan) and (abs(delta_px) >= EFFECT_MIN_PX) and (not is_darkroom)
+            effective_mm_current = 0.0
+
+            if is_darkroom:
+                # 暗房：強制回到 Idle 狀態，不累計群集
+                if state == 'InCluster':
+                    # 在群內時進入暗房 → 強制出群，post 用暗房前最後一個非暗房幀
+                    if last_non_darkroom_frame is not None and current_cluster_id:
+                        post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
+                        export_frame_jpg(last_non_darkroom_frame, post_name, video_name)
+                        # 將上一幀的 frame_path 標記為 post
+                        if 'frame_path' in result and len(result['frame_path']) > 0:
+                            result['frame_path'][-1] = post_name
+                    # 匯出 pre（若尚未匯出）
+                    if pending_pre_export is not None:
+                        export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
+                        pending_pre_export = None
+                state = 'Idle'
+                pending_idx = None
+                pending_delta_px = None
+                pending_result_idx = None
+                zero_streak = 0
+                reversal_streak = 0
+                orientation_current = 0
+                current_cluster_id = 0
+
+            elif state == 'Idle':
+                zero_streak = 0
+                reversal_streak = 0
+                if is_candidate:
+                    state = 'PendingEnter'
+                    pending_idx = frame_idx
+                    pending_delta_px = delta_px
+                    pending_result_idx = len(result['frame_idx'])  # 將在本迭代末尾寫入 0，之後再回填
+                # Idle 狀態輸出 0
+
+            elif state == 'PendingEnter':
+                if not is_candidate:
+                    # 下一幀不是候選 → 視為噪聲，取消 pending
+                    state = 'Idle'
+                    pending_idx = None
+                    pending_delta_px = None
+                    pending_result_idx = None
+                else:
+                    # 是候選：檢查符號關係
+                    if np.sign(delta_px) != np.sign(pending_delta_px):
+                        # 相反號：先檢查是否為可抵銷的正負對
+                        if abs(delta_px + pending_delta_px) <= PAIR_TOLERANCE_PX:
+                            # 典型正負對 → 抵銷後回 Idle
+                            state = 'Idle'
+                            pending_idx = None
+                            pending_delta_px = None
+                            pending_result_idx = None
+                        else:
+                            # 邊界相反但不成對 → 將當前候選改為新的 pending，等待下一幀再決定
+                            pending_idx = frame_idx
+                            pending_delta_px = delta_px
+                            pending_result_idx = len(result['frame_idx'])
+                            # 保持 PendingEnter 狀態
+                    else:
+                        # 同號候選 → 確認入群（以前一幀 pending 為起點）
+                        state = 'InCluster'
+                        physical_cluster_counter += 1
+                        current_cluster_id = physical_cluster_counter
+                        orientation_current = 1 if pending_delta_px > 0 else -1
+                        # 標記 pre：將 pending 那幀的 frame_path 設為 pre，並準備匯出快照
+                        pre_name = f'pre_cluster_{current_cluster_id:03d}.jpg'
+                        if pending_result_idx is not None and pending_result_idx < len(result['frame_path']):
+                            result['frame_path'][pending_result_idx] = pre_name
+                        # 從 frame_cache 取對應影格（優先 -2，其次 -1）
+                        pre_frame = frame_cache[-2] if len(frame_cache) >= 2 else (frame_idx, frame)
+                        pending_pre_export = (pre_frame, pre_name)
+                        # 回填 pending 幀的 mm、cluster 與方向
+                        if pending_result_idx is not None and pending_result_idx < len(result['v_travel_distance']):
+                            scale_factor = video_scale_dict.get(file_name, 1.0)
+                            result['v_travel_distance'][pending_result_idx] = pending_delta_px * 10 / scale_factor
+                            result['cluster_id'][pending_result_idx] = current_cluster_id
+                            result['orientation'][pending_result_idx] = orientation_current
+                        pending_idx = None
+                        pending_delta_px = None
+                        pending_result_idx = None
+
+            elif state == 'InCluster':
+                if is_candidate:
+                    if np.sign(delta_px) != orientation_current and abs(delta_px) <= JITTER_MAX_PX:
+                        # 小幅反向抖動：視為 0（不改狀態）
+                        pass
+                    elif np.sign(delta_px) != orientation_current:
+                        reversal_streak += 1
+                        if reversal_streak >= REVERSAL_PERSIST_R:
+                            # 真反轉：關閉當前群，下一幀再重新 Pending（簡化：回 Idle）
+                            state = 'Idle'
+                            current_cluster_id = 0
+                            orientation_current = 0
+                            reversal_streak = 0
+                            zero_streak = 0
+                        else:
+                            # 暫時視為 0
+                            pass
+                    else:
+                        # 同向：維持
+                        reversal_streak = 0
+                        zero_streak = 0
+                        effective_mm_current = delta_px * 10 / video_scale_dict.get(file_name, 1.0)
+                else:
+                    zero_streak += 1
+                    if zero_streak >= EXIT_ZERO_LEN:
+                        # 出群
+                        # 匯出 pre（若尚未匯出）與 post
+                        if current_cluster_id:
+                            post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
+                            export_frame_jpg((frame_idx, frame), post_name, video_name)
+                            if pending_pre_export is not None:
+                                export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
+                                pending_pre_export = None
+                            # 記錄本幀 post 標記（設當前索引）
+                            current_index = len(result['frame_idx'])
+                            # 本幀稍後會被 append；因此先記個變數，稍後補寫
+                            post_mark_name = post_name
+                        else:
+                            post_mark_name = ''
+                        state = 'Idle'
+                        current_cluster_id = 0
+                        orientation_current = 0
+                        zero_streak = 0
+                        reversal_streak = 0
+                    else:
+                        # 仍在群內但本幀不是候選 → 輸出 0
+                        pass
+
+            # 維護幀快取
+            frame_cache.append((frame_idx, frame.copy()))
+            if len(frame_cache) > 20:
+                frame_cache.pop(0)
+            if not is_darkroom:
+                last_non_darkroom_frame = (frame_idx, frame.copy())
+
+            # 寫入結果（目前不計 mm 位移為 0 的濾除，維持原行為）
             result['frame'].append(frame)
             result['frame_idx'].append(frame_idx)
             result['keypoints'].append(display_keypoints)
@@ -165,11 +360,24 @@ def scan(video_path, file_name):
             else:
                 print(f"⚠️  警告: 影片 {file_name} 沒有有效的比例尺資料，使用預設值 1.0")
                 scale_factor = 1.0
-            
-            result['v_travel_distance'].append(vertical_travel_distance * 10 / scale_factor)
+            # 依狀態輸出當前幀的有效位移
+            if state == 'InCluster' and effective_mm_current == 0.0 and is_candidate and np.sign(delta_px) == orientation_current:
+                effective_mm_current = delta_px * 10 / scale_factor
+            result['v_travel_distance'].append(effective_mm_current)
+            result['cluster_id'].append(current_cluster_id if state == 'InCluster' else 0)
+            result['orientation'].append(orientation_current if state == 'InCluster' else 0)
+            # 腳手架：先寫入空的群集資訊（之後實作狀態機再填實）
+            result['darkroom_event'].append(darkroom_event)
+            # 預設填空 frame_path
+            result['frame_path'].append('')
+            # 若剛剛決定 post（出群），把本幀標記為 post
+            if 'post_mark_name' in locals() and post_mark_name:
+                result['frame_path'][-1] = post_mark_name
+                del post_mark_name
 
             keypoint_list1 = keypoint_list2
             feature_descrpitor1 = feature_descrpitor2
+            prev_is_darkroom = is_darkroom
     
     # post-process the result
     for idx in range(1, len(result['v_travel_distance'])-1):
@@ -182,8 +390,8 @@ def scan(video_path, file_name):
 
     travel_distance_sum = 0
 
-    for frame, frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance in zip(
-        result['frame'], result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance']):
+    for frame, frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance, cluster_id_disp, orientation_disp in zip(
+        result['frame'], result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance'], result['cluster_id'], result['orientation']):
         travel_distance_sum += vertical_travel_distance
 
         # 檢查當前幀是否在暗房區間內（用於顯示）
@@ -206,6 +414,17 @@ def scan(video_path, file_name):
             display_text = f"travel: {round(travel_distance_sum, 5)} mm"
             text_color = (0, 0, 255) if vertical_travel_distance == 0 else (0, 255, 0)  # 紅色/綠色
         
+        # 顯示 Frame ID（第一行）
+        cv2.putText(
+            frame,
+            f"Frame: {frame_idx}",
+            (10, h-110),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255, 255, 255),
+            2)
+
+        # 顯示時間與狀態（第二行）
         cv2.putText(
             frame, 
             f"{round(frame_idx/fps, 1)} sec  {display_text}", 
@@ -214,6 +433,18 @@ def scan(video_path, file_name):
             1, 
             text_color, 
             2)
+
+        # 顯示群集與方向（第三行，僅在群內）
+        if cluster_id_disp:
+            arrow = '↑' if orientation_disp > 0 else ('↓' if orientation_disp < 0 else '')
+            cv2.putText(
+                frame,
+                f"cluster #{cluster_id_disp} {arrow}",
+                (10, h-50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 255, 255),
+                2)
         
         out.write(frame)
             
@@ -230,7 +461,11 @@ def scan(video_path, file_name):
     pd.DataFrame({
         'frame_idx':result['frame_idx'],
         'second':[round(i/(fps), 3) for i in result['frame_idx']],
-        'vertical_travel_distance (mm)':result['v_travel_distance']
+        'vertical_travel_distance (mm)':result['v_travel_distance'],
+        'cluster_id':result['cluster_id'],
+        'orientation':result['orientation'],
+        'darkroom_event':result['darkroom_event'],
+        'frame_path':result.get('frame_path', ['']*len(result['frame_idx']))
     }).to_csv(csv_path, index=False)
 
     print(f"complete: {video_path}")
