@@ -90,13 +90,7 @@ class ReferenceLine:
         dy = self.end_pixel_coords[1] - self.start_pixel_coords[1]
         return (dx**2 + dy**2) ** 0.5
 
-@dataclass
-class ReferencePoint:
-    """參考點數據結構 (保持向後兼容)"""
-    timestamp: float
-    pixel_coords: Tuple[int, int]  # (x, y) 在原始影片中的座標
-    csv_index: int
-    roi_coords: Tuple[int, int]    # (x, y) 在ROI中的座標
+
 
 class DataManager:
     """數據管理模組"""
@@ -106,6 +100,10 @@ class DataManager:
         self.video_name = video_name
         self.df = pd.read_csv(csv_path)
         self.scale_factor = scale_config.get(video_name, None)
+
+        # 確定位移欄位名稱和索引
+        self.displacement_column = self._find_displacement_column()
+        self.displacement_col_index = self.df.columns.get_loc(self.displacement_column)
         
         # 檢查 'frame_idx' 欄位是否存在以提供向下相容性
         self.use_frame_indices = 'frame_idx' in self.df.columns
@@ -117,6 +115,36 @@ class DataManager:
         if self.scale_factor is None:
             raise ValueError(f"找不到影片 {video_name} 的比例尺配置")
 
+    def _find_displacement_column(self) -> str:
+        """智能找到位移欄位"""
+        # 常見的位移欄位名稱候選
+        displacement_candidates = [
+            'displacement',  # 英文標準名稱
+            'displacement_mm',  # 帶單位的名稱
+            '位移',  # 中文名稱
+            '位移_mm',  # 中文帶單位
+        ]
+
+        # 首先嘗試按名稱匹配
+        for candidate in displacement_candidates:
+            if candidate in self.df.columns:
+                print(f"✅ 找到位移欄位: '{candidate}'")
+                return candidate
+
+        # 按欄位位置回退（兼容舊格式）
+        if len(self.df.columns) >= 3:
+            displacement_col = self.df.columns[2]  # 第3欄
+            print(f"⚠️ 按位置使用第3欄作為位移欄位: '{displacement_col}'")
+            return displacement_col
+
+        # 如果都找不到，拋出錯誤
+        available_columns = list(self.df.columns)
+        raise ValueError(
+            f"無法找到位移欄位。\n"
+            f"可用欄位: {available_columns}\n"
+            f"請確保CSV包含位移數據欄位"
+        )
+
         # 檢查是否有 frame_path 欄位（新的物理群集標籤系統）
         self.has_frame_path = 'frame_path' in self.df.columns
         if self.has_frame_path:
@@ -124,78 +152,7 @@ class DataManager:
             self.physical_clusters = self._identify_physical_clusters_from_png_tags()
             self.clusters = self._convert_physical_to_correction_clusters()
         else:
-            print("⚠️ 使用舊版群集識別系統。")
-            self.physical_clusters = []
-            self.clusters = self._identify_clusters()
-        
-    def _identify_clusters(self) -> List[CorrectionCluster]:
-        """識別所有需要校正的非零值群集"""
-        clusters = []
-        # 根據是否存在 frame_idx 欄位來決定 displacement_col 的索引
-        if self.use_frame_indices:
-            displacement_col = self.df.columns[2] # frame_idx, second, displacement
-        else:
-            displacement_col = self.df.columns[1]  # second, displacement
-        
-        i = 0
-        while i < len(self.df):
-            # 找到非零值
-            if self.df.iloc[i][displacement_col] != 0:
-                # 找到群集開始
-                start_idx = i
-                
-                # 檢查是否有前零點可用
-                if i > 0:
-                    pre_zero_idx = i - 1
-                    has_pre_zero = True
-                else:
-                    # 第一行就有位移，沒有前零點
-                    pre_zero_idx = 0
-                    has_pre_zero = False
-                    print(f"警告: 檔案從第一行就開始有位移，將使用第一行作為參考點")
-                
-                # 找到群集結束
-                while i < len(self.df) and self.df.iloc[i][displacement_col] != 0:
-                    i += 1
-                end_idx = i - 1
-                
-                # 建立時戳和幀號列表
-                if has_pre_zero:
-                    timestamps = [
-                        self.df.iloc[pre_zero_idx]['second'],
-                        *[self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]
-                    ]
-                    frame_indices = [
-                        self.df.iloc[pre_zero_idx]['frame_idx'],
-                        *[self.df.iloc[j]['frame_idx'] for j in range(start_idx, end_idx + 1)]
-                    ] if self.use_frame_indices else []
-                    csv_indices = list(range(pre_zero_idx, end_idx + 1))
-                else:
-                    timestamps = [self.df.iloc[j]['second'] for j in range(start_idx, end_idx + 1)]
-                    frame_indices = [self.df.iloc[j]['frame_idx'] for j in range(start_idx, end_idx + 1)] if self.use_frame_indices else []
-                    csv_indices = list(range(start_idx, end_idx + 1))
-                
-                # 建立群集
-                cluster = CorrectionCluster(
-                    start_index=start_idx,
-                    end_index=end_idx,
-                    pre_zero_index=pre_zero_idx,
-                    timestamps=timestamps,
-                    frame_indices=frame_indices,
-                    original_values=[
-                        self.df.iloc[j][displacement_col] for j in range(start_idx, end_idx + 1)
-                    ],
-                    csv_indices=csv_indices
-                )
-                
-                # 為特殊情況添加標記
-                setattr(cluster, 'has_pre_zero', has_pre_zero)
-                
-                clusters.append(cluster)
-            else:
-                i += 1
-                
-        return clusters
+            raise ValueError("CSV 檔案缺少 'frame_path' 欄位。此工具僅支援新版格式。")
 
     def _identify_physical_clusters_from_png_tags(self) -> List[PhysicalCluster]:
         """基於PNG標籤識別物理群集 - 極其簡化的邏輯"""
@@ -218,8 +175,7 @@ class DataManager:
                     post_zero_index = post_rows.index[0]
 
                     # 分析區間內的運動值
-                    displacement_col = self.df.columns[2]  # displacement column
-                    region_values = self.df.iloc[pre_zero_index:post_zero_index+1][displacement_col].tolist()
+                    region_values = self.df.iloc[pre_zero_index:post_zero_index+1][self.displacement_column].tolist()
 
                     # 檢查是否為純雜訊群集
                     non_zero_values = [v for v in region_values if v != 0]
@@ -253,11 +209,10 @@ class DataManager:
 
         for phys_cluster in self.physical_clusters:
             # 找到區間內的非零值範圍
-            displacement_col = self.df.columns[2]
             non_zero_indices = []
 
             for i in range(phys_cluster.pre_zero_index, phys_cluster.post_zero_index + 1):
-                if self.df.iloc[i][displacement_col] != 0:
+                if self.df.iloc[i][self.displacement_column] != 0:
                     non_zero_indices.append(i)
 
             if not non_zero_indices:
@@ -286,7 +241,7 @@ class DataManager:
                 timestamps=timestamps,
                 frame_indices=frame_indices,
                 original_values=[
-                    self.df.iloc[j][displacement_col] for j in range(start_idx, end_idx + 1)
+                    self.df.iloc[j][self.displacement_column] for j in range(start_idx, end_idx + 1)
                 ],
                 csv_indices=csv_indices
             )
@@ -361,55 +316,11 @@ class DataManager:
         """
         cluster = self.clusters[cluster_index]
 
-        # 如果是物理群集系統，使用物理群集校正邏輯
-        if self.has_frame_path and hasattr(cluster, 'physical_cluster'):
-            return self.apply_physical_cluster_correction(cluster.physical_cluster, measured_displacement)
-
-        # 舊版群集校正邏輯
-        displacement_col = self.df.columns[1]
-        
-        # 計算最小位移閾值 (基於比例尺的10%)
-        min_displacement_threshold = (10.0 / self.scale_factor) * 0.1  # 0.1像素對應的mm
-        
-        # 如果測量位移小於閾值，視為雜訊
-        if abs(measured_displacement) < min_displacement_threshold:
-            print(f"位移 {measured_displacement:.3f}mm 小於閾值 {min_displacement_threshold:.3f}mm，視為雜訊")
-            
-            # 將整個群集設為零
-            for idx in range(cluster.start_index, cluster.end_index + 1):
-                self.df.iloc[idx, 1] = 0.0
-            
-            return False
-        
-        # 計算原始值的總和 (絕對值)
-        total_original = sum(abs(val) for val in cluster.original_values)
-        
-        if total_original == 0:
-            return False
-        
-        # 按比例分配校正值
-        for i, original_val in enumerate(cluster.original_values):
-            csv_idx = cluster.start_index + i
-            
-            if original_val == 0:
-                corrected_val = 0
-            else:
-                # 按原始值的比例分配測量位移
-                ratio = abs(original_val) / total_original
-                corrected_val = measured_displacement * ratio
-                
-                # 保持原始正負號
-                if original_val < 0:
-                    corrected_val = -corrected_val
-            
-            self.df.iloc[csv_idx, 1] = corrected_val
-        
-        return True
+        # 由於已強制使用物理群集系統，直接調用其校正邏輯
+        return self.apply_physical_cluster_correction(cluster.physical_cluster, measured_displacement)
 
     def apply_physical_cluster_correction(self, physical_cluster: PhysicalCluster, measured_displacement: float) -> bool:
         """對整個物理群集區間應用校正"""
-        displacement_col = self.df.columns[2]  # frame_idx, second, displacement, frame_path
-
         # 計算最小位移閾值
         min_displacement_threshold = (10.0 / self.scale_factor) * 0.1
 
@@ -419,7 +330,7 @@ class DataManager:
 
             # 將整個物理群集區間設為零
             for i in range(physical_cluster.pre_zero_index, physical_cluster.post_zero_index + 1):
-                self.df.iloc[i, 2] = 0.0
+                self.df.iloc[i, self.displacement_col_index] = 0.0
 
             return False
 
@@ -431,7 +342,7 @@ class DataManager:
         non_zero_values = []
 
         for i in range(region_start, region_end + 1):
-            value = self.df.iloc[i, 2]  # displacement column
+            value = self.df.iloc[i, self.displacement_col_index]
             if value != 0:
                 non_zero_indices.append(i)
                 non_zero_values.append(value)
@@ -453,7 +364,7 @@ class DataManager:
             if original_val < 0:
                 corrected_val = -corrected_val
 
-            self.df.iloc[idx, 2] = corrected_val
+            self.df.iloc[idx, self.displacement_col_index] = corrected_val
 
         print(f"✅ 物理群集 {physical_cluster.cluster_id} 校正完成：{len(non_zero_indices)} 個點")
         return True
@@ -461,13 +372,23 @@ class DataManager:
     def save_corrected_csv(self) -> str:
         """
         儲存校正後的CSV檔案
-        
+
         Returns:
             儲存的檔案路徑
         """
-        # 生成新的檔名 (添加 m 前綴)
+        # 生成新的檔名 (統一使用 mc 前綴)
         original_path = Path(self.csv_path)
-        new_filename = f"m{original_path.name}"
+        original_name = original_path.name
+
+        # 移除現有前綴，取得基本檔名
+        if original_name.startswith('mc'):
+            base_name = original_name[2:]  # 移除 mc 前綴
+        elif original_name.startswith('c'):
+            base_name = original_name[1:]  # 移除 c 前綴
+        else:
+            base_name = original_name  # 無前綴
+
+        new_filename = f"mc{base_name}"
         new_path = original_path.parent / new_filename
         
         # 儲存檔案
@@ -1207,68 +1128,6 @@ class CorrectionApp:
         
         return (int(canvas_x), int(canvas_y))
     
-    def place_reference_point(self, canvas_x: int, canvas_y: int):
-        """放置參考點標記"""
-        # 轉換畫布座標到放大後ROI的座標
-        img_x, img_y, img_w, img_h = self.image_bounds
-        
-        if (canvas_x < img_x or canvas_x > img_x + img_w or
-            canvas_y < img_y or canvas_y > img_y + img_h):
-            return  # 點擊在圖像外
-        
-        # 轉換為放大後ROI中的座標
-        roi_local_x = int((canvas_x - img_x) / self.display_scale)
-        roi_local_y = int((canvas_y - img_y) / self.display_scale)
-        
-        # 轉換回原始影像座標
-        roi_x, roi_y, roi_w, roi_h = self.roi_rect
-        original_x = roi_x + (roi_local_x // self.zoom_factor)
-        original_y = roi_y + (roi_local_y // self.zoom_factor)
-        
-        # 移除之前的標記
-        self.canvas.delete("crosshair")
-        
-        # 繪製十字線 (4像素寬，相當於原影像1像素)
-        crosshair_size = 20
-        line_width = 4
-        
-        # 垂直線
-        self.canvas.create_line(
-            canvas_x, canvas_y - crosshair_size,
-            canvas_x, canvas_y + crosshair_size,
-            fill="lime", width=line_width, tags="crosshair"
-        )
-        
-        # 水平線
-        self.canvas.create_line(
-            canvas_x - crosshair_size, canvas_y,
-            canvas_x + crosshair_size, canvas_y,
-            fill="lime", width=line_width, tags="crosshair"
-        )
-        
-        # 儲存參考點 (如果已有點則替換)
-        cluster = self.data_manager.get_cluster(self.current_cluster_index)
-        has_pre_zero = getattr(cluster, 'has_pre_zero', True)
-        
-        # 默認使用第一個時戳點（向後兼容舊代碼）
-        timestamp = cluster.timestamps[0]
-        csv_index = cluster.csv_indices[0]
-        
-        reference_point = ReferencePoint(
-            timestamp=timestamp,
-            pixel_coords=(original_x, original_y),
-            csv_index=csv_index,
-            roi_coords=(roi_local_x, roi_local_y)
-        )
-        
-        # 向後兼容：如果沒有 reference_points 列表，創建一個
-        if not hasattr(self, 'reference_points'):
-            self.reference_points = []
-        
-        # 添加參考點
-        self.reference_points.append(reference_point)
-        
-        print(f"標記參考點: 時戳={timestamp:.3f}s, 座標=({original_x}, {original_y})")
     
     def on_key_press(self, event):
         """鍵盤事件處理"""
@@ -1322,7 +1181,16 @@ class CorrectionApp:
                 )
                 if not result:
                     return
-            
+
+            # 執行第一條線段的離群值剔除
+            if line1_count > self.max_annotations:
+                print(f"\n=== 第一條線段離群值剔除 ===")
+                self.remove_outlier_annotations(0)
+                # 重新更新顯示
+                self.update_reference_lines_from_annotations()
+                self.redraw_existing_lines()
+                print("===============================\n")
+
             cluster = self.data_manager.get_cluster(self.current_cluster_index)
             has_pre_zero = getattr(cluster, 'has_pre_zero', True)
             
@@ -1361,7 +1229,16 @@ class CorrectionApp:
                 )
                 if not result:
                     return
-            
+
+            # 執行第二條線段的離群值剔除
+            if line2_count > self.max_annotations:
+                print(f"\n=== 第二條線段離群值剔除 ===")
+                self.remove_outlier_annotations(1)
+                # 重新更新顯示
+                self.update_reference_lines_from_annotations()
+                self.redraw_existing_lines()
+                print("===============================\n")
+
             # 兩條線段都已標記，計算並應用校正
             self.apply_cluster_correction()
             
@@ -1429,9 +1306,8 @@ class CorrectionApp:
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
         
         # 將群集中的所有位移值設為零
-        displacement_col = self.data_manager.df.columns[1]
         for idx in range(cluster.start_index, cluster.end_index + 1):
-            self.data_manager.df.iloc[idx, 1] = 0.0
+            self.data_manager.df.iloc[idx, self.data_manager.displacement_col_index] = 0.0
         
         print(f"群集 {self.current_cluster_index + 1} 已清零（故障處理）")
         
@@ -1510,9 +1386,10 @@ class CorrectionApp:
                 measured_displacement = original_displacement
                 print(f"用戶選擇使用程式估計值: {measured_displacement:.3f}mm")
             elif choice == "re_annotate":
-                # 重新標註
-                print("用戶選擇重新標註")
-                return  # 不應用校正，留在當前階段
+                # 重新標註 - 退回到第一條線段並清空所有標註
+                print("用戶選擇重新標註，退回到第一條線段")
+                self.reset_to_first_line_annotation()
+                return  # 不應用校正，已重置到第一條線段階段
             # else: choice == "use_manual" - 使用人工測量值，繼續執行
 
         # 應用校正
@@ -1524,10 +1401,39 @@ class CorrectionApp:
             print(f"群集 {self.current_cluster_index + 1} 被視為雜訊並移除")
     
     def save_corrections(self):
-        """儲存校正結果"""
+        """儲存校正結果或暫存工作狀態"""
         try:
-            saved_path = self.data_manager.save_corrected_csv()
-            messagebox.showinfo("儲存成功", f"校正後的檔案已儲存至:\n{saved_path}")
+            # 檢查是否所有群集都已處理完成
+            total_clusters = self.data_manager.get_total_clusters()
+
+            if self.current_cluster_index >= total_clusters:
+                # 所有群集已完成，正常儲存CSV
+                saved_path = self.data_manager.save_corrected_csv()
+                messagebox.showinfo("儲存成功", f"校正後的檔案已儲存至:\n{saved_path}")
+            else:
+                # 工作未完成，詢問用戶是否要暫存
+                remaining = total_clusters - self.current_cluster_index
+                result = messagebox.askyesno(
+                    "工作未完成",
+                    f"目前進度: {self.current_cluster_index}/{total_clusters} 群集已完成\n"
+                    f"還有 {remaining} 個群集待處理\n\n"
+                    f"是否要暫存目前的工作狀態？\n"
+                    f"（選擇「否」將強制儲存CSV檔案）"
+                )
+
+                if result:
+                    # 暫存工作狀態
+                    temp_path = self.save_temporary_state()
+                    messagebox.showinfo(
+                        "暫存成功",
+                        f"工作狀態已暫存至:\n{temp_path}\n\n"
+                        f"下次開啟相同CSV檔案時可選擇載入此暫存狀態"
+                    )
+                else:
+                    # 強制儲存CSV
+                    saved_path = self.data_manager.save_corrected_csv()
+                    messagebox.showinfo("強制儲存成功", f"校正後的檔案已儲存至:\n{saved_path}")
+
         except Exception as e:
             messagebox.showerror("儲存失敗", f"無法儲存檔案: {str(e)}")
     
@@ -1585,47 +1491,56 @@ class CorrectionApp:
         self.update_status_message()
 
     def add_line_annotation(self, line: ReferenceLine):
-        """添加線段標註到記錄中，支援自動剔除離群的標註"""
+        """添加線段標註到記錄中，延遲到按N時才剔除離群值"""
         current_annotations = self.line_annotations[self.current_line_index]
 
-        # 添加新標註
+        # 添加新標註（不限制數量）
         current_annotations.append(line)
-
-        # 如果超過3次，剔除離平均最遠的那個
-        if len(current_annotations) > self.max_annotations:
-            self.remove_outlier_annotation()
 
         # 更新顯示的參考線段（使用平均值）
         self.update_reference_lines_from_annotations()
 
         print(f"線段 {self.current_line_index + 1} 已標註 {len(current_annotations)} 次")
+        if len(current_annotations) > self.max_annotations:
+            print(f"  ⚠️  超過建議數量 {self.max_annotations} 次，將在按 [N] 時自動剔除離群值")
 
-    def remove_outlier_annotation(self):
-        """剔除離平均值最遠的標註"""
-        current_annotations = self.line_annotations[self.current_line_index]
+    def remove_outlier_annotations(self, line_index: int):
+        """批量剔除指定線段中離平均值最遠的標註，保留最多3個"""
+        current_annotations = self.line_annotations[line_index]
 
         if len(current_annotations) <= self.max_annotations:
             return
 
-        # 計算每個標註的Y分量
-        y_components = [line.y_component for line in current_annotations]
+        # 計算需要剔除的數量
+        num_to_remove = len(current_annotations) - self.max_annotations
+        print(f"線段 {line_index + 1}：需要從 {len(current_annotations)} 次標註中剔除 {num_to_remove} 個離群值")
 
-        # 計算平均值
-        mean_y = sum(y_components) / len(y_components)
+        # 重複剔除直到達到目標數量
+        for round_num in range(num_to_remove):
+            if len(current_annotations) <= self.max_annotations:
+                break
 
-        # 找到離平均最遠的索引
-        max_distance = 0
-        outlier_index = 0
+            # 計算每個標註的Y分量
+            y_components = [line.y_component for line in current_annotations]
 
-        for i, y_comp in enumerate(y_components):
-            distance = abs(y_comp - mean_y)
-            if distance > max_distance:
-                max_distance = distance
-                outlier_index = i
+            # 計算平均值
+            mean_y = sum(y_components) / len(y_components)
 
-        # 剔除離群值
-        removed_annotation = current_annotations.pop(outlier_index)
-        print(f"已剔除離群標註（Y分量: {removed_annotation.y_component:.1f}，距離平均: {max_distance:.1f}）")
+            # 找到離平均最遠的索引
+            max_distance = 0
+            outlier_index = 0
+
+            for i, y_comp in enumerate(y_components):
+                distance = abs(y_comp - mean_y)
+                if distance > max_distance:
+                    max_distance = distance
+                    outlier_index = i
+
+            # 剔除離群值
+            removed_annotation = current_annotations.pop(outlier_index)
+            print(f"  第 {round_num + 1} 輪剔除：Y分量 {removed_annotation.y_component:.1f}，距離平均 {max_distance:.1f}")
+
+        print(f"✅ 線段 {line_index + 1} 剔除完成，保留 {len(current_annotations)} 次標註")
 
     def update_reference_lines_from_annotations(self):
         """從標註記錄更新參考線段顯示（使用平均值）"""
@@ -1738,10 +1653,396 @@ class CorrectionApp:
 
         return result["choice"] or "use_manual"  # 預設使用人工值
 
+    def reset_to_first_line_annotation(self):
+        """重置到第一條線段標註階段，清空所有標註記錄"""
+        print(f"📝 重置標註狀態：清空所有線段標註記錄")
+
+        # 重置階段到第一條線段
+        self.current_phase = "line_marking_1"
+        self.current_line_index = 0
+        self.current_point_in_line = 0
+
+        # 清空所有線段標註記錄
+        line1_count = len(self.line_annotations[0])
+        line2_count = len(self.line_annotations[1])
+        self.line_annotations = [[], []]
+        self.reference_lines = []
+        self.current_line_points = []
+
+        print(f"  - 已清空第一條線段 {line1_count} 次標註")
+        print(f"  - 已清空第二條線段 {line2_count} 次標註")
+        print(f"  - 重置到第一條線段標記階段")
+
+        # 清除畫布上的標記
+        self.canvas.delete("line_marker")
+        self.canvas.delete("existing_line")
+
+        # 重新顯示第一條線段（前0點）
+        self.show_current_cluster()
+
+        # 進入精細標記模式
+        self.enter_precision_marking_mode()
+        self.update_status_message()
+
+        print(f"✅ 重置完成，請重新標註第一條線段")
+
+    def save_temporary_state(self) -> str:
+        """儲存暫時工作狀態到JSON檔案"""
+        from datetime import datetime
+        import json
+        import os
+
+        # 生成暫存檔案名稱
+        csv_path = Path(self.data_manager.csv_path)
+        csv_stem = csv_path.stem  # 檔案名稱（不含副檔名）
+
+        # 暫存檔案路徑：與CSV檔案同目錄，格式為 {csv_name}_temp_{timestamp}.json
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_filename = f"{csv_stem}_temp_{timestamp}.json"
+        temp_path = csv_path.parent / temp_filename
+
+        # 建立暫存狀態資料結構
+        temp_data = {
+            "metadata": {
+                "csv_file": csv_path.name,
+                "csv_path": str(csv_path),
+                "video_file": self.video_handler.video_name,
+                "save_timestamp": datetime.now().isoformat(),
+                "format_version": "1.0"
+            },
+            "progress": {
+                "current_cluster_index": self.current_cluster_index,
+                "total_clusters": self.data_manager.get_total_clusters(),
+                "current_phase": self.current_phase,
+                "current_line_index": self.current_line_index,
+                "current_point_in_line": self.current_point_in_line
+            },
+            "settings": {
+                "map_frames_enabled": self.map_frames_enabled,
+                "map_intercept": self.map_intercept,
+                "map_slope": self.map_slope,
+                "zoom_factor": self.zoom_factor,
+                "max_annotations": self.max_annotations
+            },
+            "current_state": {
+                "roi_rect": self.roi_rect,
+                "show_reference_lines": self.show_reference_lines,
+                "line_annotations": self._serialize_line_annotations(),
+                "reference_lines": self._serialize_reference_lines()
+            },
+            "csv_modifications": self._get_csv_modifications()
+        }
+
+        # 寫入JSON檔案
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(temp_data, f, ensure_ascii=False, indent=2)
+
+        print(f"📄 暫存檔案已建立: {temp_path}")
+        print(f"   - 進度: {self.current_cluster_index}/{self.data_manager.get_total_clusters()}")
+        print(f"   - 當前階段: {self.current_phase}")
+        print(f"   - 時間戳: {timestamp}")
+
+        return str(temp_path)
+
+    def _serialize_line_annotations(self) -> list:
+        """序列化線段標註資料"""
+        serialized = []
+        for line_idx, annotations in enumerate(self.line_annotations):
+            line_data = []
+            for annotation in annotations:
+                line_data.append({
+                    "timestamp": annotation.timestamp,
+                    "start_pixel_coords": annotation.start_pixel_coords,
+                    "end_pixel_coords": annotation.end_pixel_coords,
+                    "csv_index": annotation.csv_index,
+                    "start_roi_coords": annotation.start_roi_coords,
+                    "end_roi_coords": annotation.end_roi_coords,
+                    "y_component": annotation.y_component,
+                    "length": annotation.length
+                })
+            serialized.append(line_data)
+        return serialized
+
+    def _serialize_reference_lines(self) -> list:
+        """序列化參考線段資料"""
+        serialized = []
+        for line in self.reference_lines:
+            serialized.append({
+                "timestamp": line.timestamp,
+                "start_pixel_coords": line.start_pixel_coords,
+                "end_pixel_coords": line.end_pixel_coords,
+                "csv_index": line.csv_index,
+                "start_roi_coords": line.start_roi_coords,
+                "end_roi_coords": line.end_roi_coords,
+                "y_component": line.y_component,
+                "length": line.length
+            })
+        return serialized
+
+    def _get_csv_modifications(self) -> dict:
+        """取得CSV修改記錄"""
+        # 記錄已修改的CSV數據（只記錄已完成的群集）
+        modifications = {
+            "completed_clusters": [],
+            "displacement_column": self.data_manager.displacement_column  # displacement column name
+        }
+
+        # 記錄每個已完成群集的修改詳情
+        for cluster_idx in range(self.current_cluster_index):
+            cluster = self.data_manager.get_cluster(cluster_idx)
+
+            # 取得該群集的CSV行範圍
+            if hasattr(cluster, 'physical_cluster'):
+                physical_cluster = cluster.physical_cluster
+                start_row = physical_cluster.pre_zero_index
+                end_row = physical_cluster.post_zero_index
+
+                # 記錄修改的行和值
+                modified_rows = {}
+                for row_idx in range(start_row, end_row + 1):
+                    modified_rows[row_idx] = float(self.data_manager.df.iloc[row_idx, self.data_manager.displacement_col_index])
+
+                modifications["completed_clusters"].append({
+                    "cluster_index": cluster_idx,
+                    "physical_cluster_id": physical_cluster.cluster_id,
+                    "csv_row_range": [start_row, end_row],
+                    "modified_values": modified_rows
+                })
+
+        return modifications
+
+    def load_temporary_state(self, temp_data: dict):
+        """載入暫存工作狀態"""
+        print(f"📂 載入暫存狀態...")
+
+        try:
+            # 恢復進度狀態
+            progress = temp_data["progress"]
+            self.current_cluster_index = progress["current_cluster_index"]
+            self.current_phase = progress["current_phase"]
+            self.current_line_index = progress["current_line_index"]
+            self.current_point_in_line = progress["current_point_in_line"]
+
+            # 恢復設定
+            settings = temp_data["settings"]
+            self.map_frames_enabled = settings.get("map_frames_enabled", self.map_frames_enabled)
+            self.map_intercept = settings.get("map_intercept", self.map_intercept)
+            self.map_slope = settings.get("map_slope", self.map_slope)
+            self.zoom_factor = settings.get("zoom_factor", 8)
+            self.max_annotations = settings.get("max_annotations", 3)
+
+            # 恢復當前狀態
+            current_state = temp_data["current_state"]
+            self.roi_rect = current_state.get("roi_rect")
+            self.show_reference_lines = current_state.get("show_reference_lines", True)
+
+            # 恢復線段標註
+            if current_state.get("line_annotations"):
+                self.line_annotations = self._deserialize_line_annotations(current_state["line_annotations"])
+
+            # 恢復參考線段
+            if current_state.get("reference_lines"):
+                self.reference_lines = self._deserialize_reference_lines(current_state["reference_lines"])
+
+            # 恢復CSV修改
+            self._restore_csv_modifications(temp_data["csv_modifications"])
+
+            print(f"   - 進度: 群集 {self.current_cluster_index}/{progress['total_clusters']}")
+            print(f"   - 階段: {self.current_phase}")
+            print(f"   - 已恢復 {len([anno for line_annos in self.line_annotations for anno in line_annos])} 個線段標註")
+            print(f"   - 已恢復 {len(temp_data['csv_modifications']['completed_clusters'])} 個已完成群集的修改")
+
+        except Exception as e:
+            print(f"❌ 載入暫存狀態失敗: {e}")
+            # 重置為初始狀態
+            self.current_cluster_index = 0
+            self.current_phase = "roi_selection"
+            self.current_line_index = 0
+            self.current_point_in_line = 0
+            self.roi_rect = None
+            self.line_annotations = [[], []]
+            self.reference_lines = []
+
+    def _deserialize_line_annotations(self, serialized_data: list) -> list:
+        """反序列化線段標註資料"""
+        line_annotations = []
+        for line_data in serialized_data:
+            annotations = []
+            for annotation_data in line_data:
+                annotation = ReferenceLine(
+                    timestamp=annotation_data["timestamp"],
+                    start_pixel_coords=tuple(annotation_data["start_pixel_coords"]),
+                    end_pixel_coords=tuple(annotation_data["end_pixel_coords"]),
+                    csv_index=annotation_data["csv_index"],
+                    start_roi_coords=tuple(annotation_data["start_roi_coords"]),
+                    end_roi_coords=tuple(annotation_data["end_roi_coords"])
+                )
+                annotations.append(annotation)
+            line_annotations.append(annotations)
+        return line_annotations
+
+    def _deserialize_reference_lines(self, serialized_data: list) -> list:
+        """反序列化參考線段資料"""
+        reference_lines = []
+        for line_data in serialized_data:
+            line = ReferenceLine(
+                timestamp=line_data["timestamp"],
+                start_pixel_coords=tuple(line_data["start_pixel_coords"]),
+                end_pixel_coords=tuple(line_data["end_pixel_coords"]),
+                csv_index=line_data["csv_index"],
+                start_roi_coords=tuple(line_data["start_roi_coords"]),
+                end_roi_coords=tuple(line_data["end_roi_coords"])
+            )
+            reference_lines.append(line)
+        return reference_lines
+
+    def _restore_csv_modifications(self, modifications: dict):
+        """恢復CSV修改"""
+        completed_clusters = modifications.get("completed_clusters", [])
+
+        for cluster_info in completed_clusters:
+            modified_values = cluster_info["modified_values"]
+            for row_idx, value in modified_values.items():
+                # 恢復CSV中的修改值
+                self.data_manager.df.iloc[int(row_idx), self.data_manager.displacement_col_index] = value
+
+        print(f"   - 已恢復 {len(completed_clusters)} 個群集的CSV修改")
+
     def quit_application(self):
         """退出應用程式"""
         if messagebox.askokcancel("確認退出", "是否要退出校正工具？\n未儲存的更改將丟失。"):
             self.root.quit()
+
+def find_temp_files(csv_path: str) -> list:
+    """尋找CSV檔案對應的暫存檔案"""
+    import glob
+    import json
+    from datetime import datetime
+
+    csv_path = Path(csv_path)
+    csv_stem = csv_path.stem
+
+    # 搜尋同目錄下的暫存檔案
+    temp_pattern = str(csv_path.parent / f"{csv_stem}_temp_*.json")
+    temp_files = glob.glob(temp_pattern)
+
+    # 解析並驗證暫存檔案
+    valid_temp_files = []
+    for temp_file in temp_files:
+        try:
+            with open(temp_file, 'r', encoding='utf-8') as f:
+                temp_data = json.load(f)
+
+            # 驗證檔案格式
+            if all(key in temp_data for key in ["metadata", "progress", "csv_modifications"]):
+                # 解析時間戳
+                save_time = datetime.fromisoformat(temp_data["metadata"]["save_timestamp"])
+                valid_temp_files.append({
+                    "path": temp_file,
+                    "data": temp_data,
+                    "save_time": save_time,
+                    "progress": f"{temp_data['progress']['current_cluster_index']}/{temp_data['progress']['total_clusters']}"
+                })
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"⚠️ 無效的暫存檔案: {temp_file} - {e}")
+
+    # 按時間戳排序（最新的在前）
+    valid_temp_files.sort(key=lambda x: x["save_time"], reverse=True)
+
+    return valid_temp_files
+
+
+def select_temp_file(root: tk.Tk, temp_files: list) -> dict:
+    """讓用戶選擇要載入的暫存檔案"""
+    if len(temp_files) == 1:
+        # 只有一個暫存檔案，直接詢問是否載入
+        temp_info = temp_files[0]
+        result = messagebox.askyesno(
+            "發現暫存檔案",
+            f"發現工作暫存檔案：\n\n"
+            f"建立時間：{temp_info['save_time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"進度：{temp_info['progress']} 群集\n"
+            f"階段：{temp_info['data']['progress']['current_phase']}\n\n"
+            f"是否要載入此暫存狀態？"
+        )
+        return temp_info if result else None
+
+    # 多個暫存檔案，創建選擇對話框
+    dialog = tk.Toplevel(root)
+    dialog.title("選擇暫存檔案")
+    dialog.geometry("600x400")
+    dialog.modal = True
+    dialog.grab_set()
+
+    # 置中顯示
+    dialog.transient(root)
+    x = (dialog.winfo_screenwidth() // 2) - (300)
+    y = (dialog.winfo_screenheight() // 2) - (200)
+    dialog.geometry(f"600x400+{x}+{y}")
+
+    selected_temp = {"choice": None}
+
+    # 標題
+    title_label = ttk.Label(dialog, text="發現多個暫存檔案，請選擇要載入的版本：", font=("Arial", 12, "bold"))
+    title_label.pack(pady=10)
+
+    # 列表框架
+    list_frame = ttk.Frame(dialog)
+    list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+    # 列表框
+    columns = ("時間", "進度", "階段", "檔案")
+    tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=10)
+
+    # 設定欄位標題
+    tree.heading("時間", text="建立時間")
+    tree.heading("進度", text="進度")
+    tree.heading("階段", text="當前階段")
+    tree.heading("檔案", text="檔案名稱")
+
+    # 設定欄位寬度
+    tree.column("時間", width=150)
+    tree.column("進度", width=80)
+    tree.column("階段", width=120)
+    tree.column("檔案", width=200)
+
+    # 添加資料
+    for i, temp_info in enumerate(temp_files):
+        tree.insert("", "end", values=(
+            temp_info["save_time"].strftime("%Y-%m-%d %H:%M:%S"),
+            temp_info["progress"],
+            temp_info["data"]["progress"]["current_phase"],
+            Path(temp_info["path"]).name
+        ), tags=(i,))
+
+    tree.pack(fill=tk.BOTH, expand=True)
+
+    # 按鈕框架
+    button_frame = ttk.Frame(dialog)
+    button_frame.pack(fill=tk.X, padx=20, pady=10)
+
+    def on_load():
+        selection = tree.selection()
+        if selection:
+            item = tree.item(selection[0])
+            index = int(tree.item(selection[0], "tags")[0])
+            selected_temp["choice"] = temp_files[index]
+            dialog.destroy()
+        else:
+            messagebox.showwarning("請選擇", "請先選擇一個暫存檔案")
+
+    def on_skip():
+        selected_temp["choice"] = None
+        dialog.destroy()
+
+    ttk.Button(button_frame, text="載入選擇的暫存檔案", command=on_load).pack(side=tk.LEFT, padx=(0, 10))
+    ttk.Button(button_frame, text="跳過暫存檔案", command=on_skip).pack(side=tk.LEFT)
+
+    # 等待用戶選擇
+    dialog.wait_window()
+
+    return selected_temp["choice"]
+
 
 def main():
     """主函數 - 選擇檔案並啟動校正工具"""
@@ -1759,22 +2060,32 @@ def main():
     try:
         # 選擇清理後的CSV檔案
         csv_path = filedialog.askopenfilename(
-            title="選擇清理後的CSV檔案",
+            title="選擇分析結果CSV檔案",
             initialdir="lifts/result",
-            filetypes=[("CSV檔案", "c*.csv"), ("所有檔案", "*.*")]
+            filetypes=[("CSV檔案", "*.csv"), ("所有檔案", "*.*")]
         )
         
         if not csv_path:
             return
-        
+
+        # 檢查是否有對應的暫存檔案
+        temp_data = None
+        temp_files = find_temp_files(csv_path)
+        if temp_files:
+            temp_data = select_temp_file(root, temp_files)
+
         # 從CSV檔名推導影片檔名
         csv_filename = Path(csv_path).name
+        # 支援帶前綴或不帶前綴的CSV檔案
         if csv_filename.startswith('c'):
             video_filename = csv_filename[1:]  # 移除 'c' 前綴
             video_filename = video_filename.replace('.csv', '.mp4')
+        elif csv_filename.startswith('mc'):
+            video_filename = csv_filename[2:]  # 移除 'mc' 前綴
+            video_filename = video_filename.replace('.csv', '.mp4')
         else:
-            messagebox.showerror("錯誤", "請選擇以 'c' 開頭的清理後CSV檔案")
-            return
+            # 不帶前綴的CSV檔案，直接使用檔名
+            video_filename = csv_filename.replace('.csv', '.mp4')
         
         # 檢查對應的影片檔案
         video_path = Path("lifts/data") / video_filename
@@ -1807,6 +2118,12 @@ def main():
             map_intercept=args.map_intercept,
             map_slope=args.map_slope,
         )
+
+        # 如果有暫存資料，載入狀態
+        if temp_data:
+            app.load_temporary_state(temp_data["data"])
+            print(f"✅ 已載入暫存狀態：進度 {temp_data['progress']}")
+
         app.start_correction()
         root.mainloop()
         

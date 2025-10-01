@@ -368,47 +368,71 @@ class DataCleaner:
         frame_indices = []
         times = []
         values = []
-        frame_paths = []  # 新增：儲存 frame_path 欄位
+        all_row_data = []  # 儲存所有原始行資料以保持完整性
 
         # 讀取數據
         with open(input_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             header = next(reader)  # 讀取標題行
 
-            # 檢查是否為新格式（包含frame_idx）
-            has_frame_idx = len(header) >= 3 and 'frame' in header[0].lower()
-            # 檢查是否包含 frame_path 欄位
-            has_frame_path = len(header) >= 4
+            # 建立欄位名稱到索引的映射
+            column_mapping = {}
+            for i, col_name in enumerate(header):
+                column_mapping[col_name.strip().lower()] = i
 
+            # 定義關鍵欄位的可能名稱（處理不同命名）
+            key_columns = {
+                'frame_idx': ['frame_idx', 'frame', 'frame_index'],
+                'time': ['second', 'time', 'timestamp'],
+                'displacement': ['vertical_travel_distance (mm)', 'displacement', 'travel_distance'],
+                'frame_path': ['frame_path', 'path']
+            }
+
+            # 找到對應的欄位索引
+            field_indices = {}
+            for field, possible_names in key_columns.items():
+                field_indices[field] = None
+                for name in possible_names:
+                    if name in column_mapping:
+                        field_indices[field] = column_mapping[name]
+                        break
+
+            # 檢查必要欄位是否存在
+            if field_indices['time'] is None:
+                # 嘗試舊格式：時間在第0欄
+                if len(header) >= 2:
+                    field_indices['time'] = 0
+                    field_indices['displacement'] = 1
+                    field_indices['frame_idx'] = None  # 舊格式沒有frame_idx
+                else:
+                    raise ValueError(f"無法在檔案 {input_path} 中找到時間欄位")
+
+            if field_indices['displacement'] is None:
+                raise ValueError(f"無法在檔案 {input_path} 中找到位移欄位")
+
+            # 讀取資料行
             for row in reader:
-                if has_frame_idx and len(row) >= 3:
-                    try:
-                        frame_idx = int(row[0])
-                        time_val = float(row[1])
-                        displacement_val = float(row[2])
+                if len(row) < len(header):
+                    continue  # 跳過不完整的行
 
-                        # 處理 frame_path 欄位（如果存在）
-                        if has_frame_path and len(row) >= 4:
-                            frame_path = row[3] if row[3] else ''
-                        else:
-                            frame_path = ''
+                try:
+                    # 提取關鍵數據
+                    time_val = float(row[field_indices['time']])
+                    displacement_val = float(row[field_indices['displacement']])
 
-                        frame_indices.append(frame_idx)
-                        times.append(time_val)
-                        values.append(displacement_val)
-                        frame_paths.append(frame_path)
-                    except ValueError:
-                        continue
-                elif not has_frame_idx and len(row) >= 2:
-                    try:
-                        time_val = float(row[0])
-                        displacement_val = float(row[1])
-                        frame_indices.append(len(times))  # 使用索引作為frame_idx
-                        times.append(time_val)
-                        values.append(displacement_val)
-                        frame_paths.append('')  # 舊格式沒有 frame_path
-                    except ValueError:
-                        continue
+                    # 提取frame_idx（如果存在）
+                    if field_indices['frame_idx'] is not None:
+                        frame_idx = int(row[field_indices['frame_idx']])
+                    else:
+                        frame_idx = len(times)  # 使用索引作為frame_idx
+
+                    frame_indices.append(frame_idx)
+                    times.append(time_val)
+                    values.append(displacement_val)
+                    all_row_data.append(row.copy())  # 保存完整的行資料
+
+                except (ValueError, IndexError):
+                    continue
         
         # 清理數據並獲取詳細記錄
         cleaned_values, noise_count, threshold, basic_unit, processing_details, cluster_analysis, stage1_stats, stage2_stats = self.clean_data(values, times)
@@ -418,19 +442,14 @@ class DataCleaner:
             writer = csv.writer(f)
             writer.writerow(header)  # 寫入標題行
 
-            if has_frame_idx:
-                if has_frame_path:
-                    # 新格式：包含 frame_path 欄位
-                    for frame_idx, time_val, clean_val, frame_path in zip(frame_indices, times, cleaned_values, frame_paths):
-                        writer.writerow([frame_idx, time_val, clean_val, frame_path])
-                else:
-                    # 舊的新格式：只有 frame_idx 但沒有 frame_path
-                    for frame_idx, time_val, clean_val in zip(frame_indices, times, cleaned_values):
-                        writer.writerow([frame_idx, time_val, clean_val])
-            else:
-                # 最舊格式：只有時間和位移
-                for time_val, clean_val in zip(times, cleaned_values):
-                    writer.writerow([time_val, clean_val])
+            # 動態重建每一行，只修改位移值
+            for i, (original_row, clean_val) in enumerate(zip(all_row_data, cleaned_values)):
+                # 創建新行，複製原始資料
+                new_row = original_row.copy()
+                # 只更新位移欄位
+                if field_indices['displacement'] < len(new_row):
+                    new_row[field_indices['displacement']] = str(clean_val)
+                writer.writerow(new_row)
         
         # 生成清理報告
         report = self._generate_cleaning_report(

@@ -1,0 +1,170 @@
+暗房運動偵測驗證報告 v3
+======================================================================
+
+v3 修正:
+  - 旋轉後再建立 ROI 遮罩
+  - ROI 回退到 0.6
+  - 確保視覺化輸出正確
+
+測試影片: lifts/darkroom_data/21_a.mp4
+旋轉角度: 21.0°
+ROI 比例: 0.6
+測試區間: 180s - 195s
+總幀數: 149
+
+詳細結果:
+----------------------------------------------------------------------
+Frame  10806 |  180.10s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10812 |  180.20s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  10818 |  180.30s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  10824 |  180.40s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10830 |  180.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10836 |  180.60s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: no_cluster
+Frame  10842 |  180.70s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10848 |  180.80s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  10854 |  180.90s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10860 |  181.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10866 |  181.10s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  10872 |  181.20s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10878 |  181.30s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10884 |  181.40s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  10890 |  181.50s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10896 |  181.60s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10902 |  181.70s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10908 |  181.80s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  10914 |  181.90s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10920 |  182.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10926 |  182.10s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10932 |  182.20s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10938 |  182.30s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  10944 |  182.40s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10950 |  182.50s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10956 |  182.60s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  10962 |  182.70s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  10968 |  182.80s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  10974 |  182.90s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10980 |  183.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  10986 |  183.10s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  10992 |  183.20s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  10998 |  183.30s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11004 |  183.40s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11010 |  183.50s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11016 |  183.60s | KP:  22 | Matches:  18 | V-Travel:     0 px | Status: static
+Frame  11022 |  183.70s | KP:  22 | Matches:  17 | V-Travel:     0 px | Status: static
+Frame  11028 |  183.80s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11034 |  183.90s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: no_cluster
+Frame  11040 |  184.00s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11046 |  184.10s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11052 |  184.20s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11058 |  184.30s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11064 |  184.40s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11070 |  184.50s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  11076 |  184.60s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11082 |  184.70s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11088 |  184.80s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11094 |  184.90s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11100 |  185.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11106 |  185.10s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11112 |  185.20s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11118 |  185.30s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11124 |  185.40s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11130 |  185.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11136 |  185.60s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11142 |  185.70s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11148 |  185.80s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11154 |  185.90s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11160 |  186.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11166 |  186.10s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11172 |  186.20s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11178 |  186.30s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11184 |  186.40s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11190 |  186.50s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11196 |  186.60s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11202 |  186.70s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11208 |  186.80s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11214 |  186.90s | KP:  22 | Matches:  17 | V-Travel:     0 px | Status: static
+Frame  11220 |  187.00s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11226 |  187.10s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11232 |  187.20s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11238 |  187.30s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11244 |  187.40s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11250 |  187.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11256 |  187.60s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11262 |  187.70s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11268 |  187.80s | KP:  22 | Matches:  13 | V-Travel:    71 px | Status: motion
+Frame  11274 |  187.90s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11280 |  188.00s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  11286 |  188.10s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11292 |  188.20s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11298 |  188.30s | KP:  22 | Matches:  17 | V-Travel:     0 px | Status: static
+Frame  11304 |  188.40s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: no_cluster
+Frame  11310 |  188.50s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11316 |  188.60s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  11322 |  188.70s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11328 |  188.80s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11334 |  188.90s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11340 |  189.00s | KP:  22 | Matches:  10 | V-Travel:     0 px | Status: static
+Frame  11346 |  189.10s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11352 |  189.20s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11358 |  189.30s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11364 |  189.40s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11370 |  189.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11376 |  189.60s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11382 |  189.70s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11388 |  189.80s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11394 |  189.90s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11400 |  190.00s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11406 |  190.10s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: no_cluster
+Frame  11412 |  190.20s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11418 |  190.30s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11424 |  190.40s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11430 |  190.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11436 |  190.60s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11442 |  190.70s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11448 |  190.80s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11454 |  190.90s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11460 |  191.00s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11466 |  191.10s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11472 |  191.20s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11478 |  191.30s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11484 |  191.40s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11490 |  191.50s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11496 |  191.60s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11502 |  191.70s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11508 |  191.80s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11514 |  191.90s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11520 |  192.00s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11526 |  192.10s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11532 |  192.20s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11538 |  192.30s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11544 |  192.40s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11550 |  192.50s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11556 |  192.60s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11562 |  192.70s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11568 |  192.80s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11574 |  192.90s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11580 |  193.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11586 |  193.10s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11592 |  193.20s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: static
+Frame  11598 |  193.30s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11604 |  193.40s | KP:  22 | Matches:  15 | V-Travel:     1 px | Status: motion
+Frame  11610 |  193.50s | KP:  22 | Matches:  15 | V-Travel:     0 px | Status: static
+Frame  11616 |  193.60s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11622 |  193.70s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11628 |  193.80s | KP:  22 | Matches:  13 | V-Travel:     0 px | Status: no_cluster
+Frame  11634 |  193.90s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11640 |  194.00s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11646 |  194.10s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+Frame  11652 |  194.20s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11658 |  194.30s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11664 |  194.40s | KP:  22 | Matches:  13 | V-Travel:    -2 px | Status: motion
+Frame  11670 |  194.50s | KP:  22 | Matches:  12 | V-Travel:     0 px | Status: static
+Frame  11676 |  194.60s | KP:  22 | Matches:  16 | V-Travel:     0 px | Status: static
+Frame  11682 |  194.70s | KP:  22 | Matches:   9 | V-Travel:     0 px | Status: static
+Frame  11688 |  194.80s | KP:  22 | Matches:  14 | V-Travel:     0 px | Status: static
+Frame  11694 |  194.90s | KP:  22 | Matches:  11 | V-Travel:     0 px | Status: static
+
+======================================================================
+成功率: 96.6%
+平均特徵點: 22.0 個
+平均匹配對: 13.0 對

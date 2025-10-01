@@ -2,7 +2,7 @@
 
 ## 概要
 
-這個工作流程用於手動校正電梯位移檢測數據，通過視覺化的方式讓使用者標記真實的位移參考點，以提供 ground truth 來校正自動檢測的結果。
+這個工作流程用於手動校正電梯位移檢測數據，通過高精度的視覺化線段標記讓使用者提供真實的位移參考，校正自動檢測結果。支援多檔案格式、智能暫存恢復、以及物理群集精確定位。
 
 ## 系統架構
 
@@ -10,74 +10,81 @@
 - **影片處理**: `lifts/data/*.mp4` - 原始影片檔案
 - **旋轉校正**: `src/rotation_config.py` + `src/rotation_utils.py` - 影片旋轉處理
 - **比例尺換算**: `src/scale_config.py` - 像素到毫米的換算係數
-- **清理數據**: `lifts/result/c*.csv` - 經過雜訊清理的位移數據
+- **分析數據**: `lifts/result/*.csv` - 主程式輸出的位移數據（支援多種格式）
+- **預匯出幀**: `lifts/exported_frames/{video_name}/` - 物理群集參考幀
+- **暫存系統**: `lifts/result/*_temp_*.json` - 工作狀態暫存檔案
 
 ### 工作流程圖
 ```
-原始影片 → 旋轉校正 → 物理群集檢測 → JPG幀匯出 → ROI選擇 → 多次線段標記 → 位移校正 → 更新CSV
-    ↓           ↓           ↓            ↓         ↓         ↓            ↓          ↓
-  data/     rotation    motion       exported   user     3x avg      comparison   corrected
- *.mp4      utils     clustering      JPG      ROI     marking      warning      CSV
+原始影片 → 旋轉校正 → 物理群集檢測 → JPG幀匯出 → 智能CSV載入 → 暫存檢測 → ROI選擇 → 8倍放大標記 → 3次平均校正 → 智能儲存
+    ↓           ↓           ↓            ↓           ↓           ↓         ↓         ↓            ↓            ↓
+  data/     rotation    motion       exported     flexible    temp      user      8x zoom     avg+outlier   temp/final
+ *.mp4      utils     clustering      JPG        format      resume    ROI      precision    removal       output
 ```
 
 ## 詳細工作流程
 
-### 階段 0: 初始化
-1. 載入原始影片檔案 (`lifts/data/*.mp4`)
-2. 檢查是否需要旋轉校正 (`rotation_config.py`)
-3. 如需旋轉，使用 `rotation_utils.py` 進行校正
-4. 載入對應的清理後 CSV 檔案 (`lifts/result/c*.csv`)
-5. 載入比例尺配置 (`scale_config.py`)
-6. **檢測物理群集標籤**: 自動識別 `frame_path` 欄位中的 JPG 標籤
-7. **載入預匯出幀**: 優先使用預匯出的 JPG 參考幀，提高導航精度
+### 階段 0: 智能初始化
+1. **智能檔案載入**: 支援多種CSV格式 (`1.csv`, `c1.csv`, `mc1.csv`)
+2. **暫存檢測**: 自動搜尋同名暫存檔案 (`{name}_temp_{timestamp}.json`)
+3. **暫存選擇**: 多個暫存檔案時提供選擇介面，顯示建立時間和進度
+4. **狀態恢復**: 載入暫存狀態，包括進度、標註記錄、CSV修改
+5. **欄位智能檢測**: 自動識別位移欄位 (`displacement`, `displacement_mm`, `位移`)
+6. **載入配置**: 比例尺、旋轉角度、物理群集標籤
+7. **預匯出幀檢測**: 檢查 `lifts/exported_frames/{video_name}/` 目錄
 
-### 階段 1: 智能導航到校正點
-- **JPG 優先**: 優先載入預匯出的 `pre_cluster_XXX.jpg` 作為前零點參考
-- **物理群集**: 基於運動檢測時的物理邊界，不是數據清理後的邊界
-- **精確定位**: 使用物理群集標籤系統，確保參考點準確性
-- **範例**: 物理群集001的前零點直接載入 `pre_cluster_001.jpg`
+### 階段 1: 智能導航與JPG載入
+- **物理群集優先**: 基於 `frame_path` 欄位的 JPG 標籤進行精確導航
+- **JPG檔案路徑**: `lifts/exported_frames/{video_name}/pre_cluster_XXX.jpg`
+- **自動回退**: JPG不可用時回退到影片幀載入
+- **精確定位**: 使用預匯出的物理群集邊界，不是清理後邊界
+- **完整資訊**: 顯示群集ID、運動點數、檔案來源
 
-### 階段 2: ROI 選擇
-- **操作**: 使用者在完整畫面上框選 ROI (Region of Interest)
-- **目的**: 選擇包含絕對參考點的區域
-- **介面**: 滑鼠拖拽矩形框選
-- **確認**: 按下確認鍵進入下一階段
+### 階段 2: ROI 選擇與驗證
+- **操作**: 滑鼠拖拽選擇 ROI 區域
+- **最小尺寸**: 50×50 像素限制，確保有效標記空間
+- **視覺回饋**: 紅色虛線框顯示選擇區域
+- **座標轉換**: 自動處理畫布↔影像座標轉換
+- **確認機制**: 按 `N` 進入精細標記模式
 
-### 階段 3: 精細線段標記 (8倍放大)
-- **顯示**: 僅顯示 ROI 區域，放大 8 倍以提高精度
-- **標記工具**: 線段標記 (點擊兩點形成參考線段)
-- **多次標註**: 支援每條線段標註3次取平均值，提高準確性
-- **操作**:
-  1. 點擊第一個點 (綠色圓點標記線段起點)
-  2. 點擊第二個點 (橙色圓點標記線段終點，自動連線)
-  3. 可按 [R] 重複標註同一線段，最多3次
-  4. 可按 [Z] 取消最後一次標註
-- **視覺控制**: 按 [H] 隱藏/顯示參考線段，避免遮擋關鍵特徵
-- **確認**: 按下 'n' (next) 確認線段並記錄座標
+### 階段 3: 超高精度線段標記 (8倍放大)
+- **8倍放大**: ROI區域8倍放大，極高精度標記
+- **線段標記**: 點擊兩點形成參考線段（起點→終點）
+- **多次標註系統**:
+  - 支援無限次標註（超過3次會有提醒）
+  - 按 `N` 進入下一步時才進行離群值剔除
+  - 自動保留最接近平均值的3個標註
+- **視覺標記**: 綠色起點 + 橙色終點 + 連線
+- **操作快捷鍵**:
+  - `R`: 重複標註當前線段
+  - `Z`: 取消最後一次標註
+  - `H`: 隱藏/顯示參考線段
+  - `N`: 確認並進入下一階段
 
-### 階段 4: 移動到群集結束點
-- **JPG 載入**: 自動載入 `post_cluster_XXX.jpg` 作為後零點參考
-- **物理邊界**: 基於原始運動檢測的真實結束點，非清理後邊界
-- **視覺對比**: 顯示運動前後的實際狀態差異
-- **操作**: 使用者再次進行 ROI 選擇和多次精細標記
-- **精度提升**: 支援3次標註取平均，自動剔除離群值
-- **確認**: 按下 'n' 記錄第二條參考線段
+### 階段 4: 第二條線段標記
+- **自動載入**: 載入 `post_cluster_XXX.jpg` 後零點參考
+- **對比標記**: 顯示第一條線段供參考（青色線段）
+- **相同精度**: 8倍放大 + 多次標註系統
+- **離群值處理**: 按 `N` 時自動剔除兩條線段的離群標註
+- **視覺區分**: 黃色線段區分第二條線段
 
 ### 階段 5: 智能位移計算與校正
-- **多次平均**: 使用3次標註的平均線段進行計算
-- **離群檢測**: 自動剔除離平均值最遠的標註
-- **計算**: 兩條平均線段的 Y 分量差值 (像素)
-- **換算**: 使用 `scale_config.py` 中的比例係數轉換為毫米
-- **公式**: `實際位移(mm) = (線段2_Y分量 - 線段1_Y分量) × 10 / scale_config[影片名稱]`
-- **比較警示**: 當人工測量值小於程式估計值95%時觸發警告
-- **處理選項**: 提供「使用程式估計值」、「重新標註」、「使用人工校正值」三種選擇
-- **優勢**: 線段標記能自動消除畫面晃動的影響
-- **校正**: 按比例分配校正整個物理群集區間的位移值
+- **平均計算**: 基於剔除離群值後的3次標註平均線段
+- **Y分量計算**: `displacement = line2.y_component - line1.y_component`
+- **比例換算**: `displacement_mm = (pixel_diff × 10.0) / scale_factor`
+- **比較警示**: 人工值 < 程式估計值95% 時觸發警告對話框
+- **三種選擇**:
+  1. **使用程式估計值**: 採用自動檢測結果
+  2. **重新標註**: 完全重置到第一條線段，清空所有標註
+  3. **使用人工校正值**: 採用人工測量結果
+- **比例分配**: 按原始值比例分配校正值到整個物理群集
+- **雜訊過濾**: 小於閾值的位移自動歸零
 
-### 階段 6: 迭代處理
-- **繼續**: 移動到下一個非零群集的前一個零點
-- **重複**: 階段 2-5，直到處理完所有非零群集
-- **完成**: 儲存校正後的 CSV 檔案
+### 階段 6: 智能儲存與暫存
+- **完成檢測**: 自動檢測是否所有群集已處理完成
+- **暫存選項**: 工作未完成時提供暫存功能
+- **暫存格式**: JSON格式，包含時間戳、進度、標註記錄、CSV修改
+- **最終儲存**: 統一使用 `mc` 前綴，支援覆蓋已有校正檔案
 
 ## 數據校正演算法
 
@@ -86,266 +93,364 @@
 
 **晃動示例**：
 ```
-線段1 (群集前): 起點(100,200) → 終點(100,250)  Y分量=50像素
-線段2 (群集後): 起點(102,205) → 終點(102,258)  Y分量=53像素
+線段1 (前零點): 起點(100,200) → 終點(100,250)  Y分量=50像素
+線段2 (後零點): 起點(102,205) → 終點(102,258)  Y分量=53像素
 ```
 
 雖然整體畫面向右上方移動了 (2,5) 像素，但：
 - 實際位移 = 53 - 50 = 3像素 ✓ (晃動被抵消)
 - 單點法誤差 = 258 - 250 = 8像素 ✗ (包含晃動)
 
-### 比例分配校正
-假設原始清理後的數據：
-```
-第469項: 0
-第470項: 0.3   (比例: 0.3/1.0 = 30%)
-第471項: 0.2   (比例: 0.2/1.0 = 20%)  
-第472項: 0.5   (比例: 0.5/1.0 = 50%)
-第473項: 0
-```
+### 多次標註平均系統
+每條線段支援多次標註以提高精度：
 
-如果線段測量的實際位移是 4mm，校正後：
-```
-第469項: 0
-第470項: 4 × 0.3 = 1.2mm
-第471項: 4 × 0.2 = 0.8mm
-第472項: 4 × 0.5 = 2.0mm
-第473項: 0
-```
+**標註流程**：
+1. 使用者可標註任意次數（建議3次）
+2. 超過3次時按 `N` 進入下一步才剔除離群值
+3. 迭代剔除離平均值最遠的標註，保留3個最接近的
+4. 計算平均座標作為最終線段
 
-### 校正公式
+**離群值剔除算法**：
 ```python
-def correct_cluster(cluster_values, measured_displacement):
+def remove_outliers(annotations, max_keep=3):
+    while len(annotations) > max_keep:
+        y_components = [line.y_component for line in annotations]
+        mean_y = sum(y_components) / len(y_components)
+
+        # 找到離平均最遠的標註
+        max_distance = 0
+        outlier_index = 0
+        for i, y_comp in enumerate(y_components):
+            distance = abs(y_comp - mean_y)
+            if distance > max_distance:
+                max_distance = distance
+                outlier_index = i
+
+        # 剔除離群值
+        annotations.pop(outlier_index)
+```
+
+### 物理群集比例分配校正
+基於物理群集邊界進行整體校正：
+
+**物理群集範圍**：
+```
+pre_cluster_001.jpg  ← 前零點（標記第一條線段）
+   第469項: 0        ← 物理群集起始
+   第470項: 0.3mm    ← 運動開始
+   第471項: 0.2mm    ← 運動中
+   第472項: 0.5mm    ← 運動結束
+   第473項: 0        ← 物理群集結束
+post_cluster_001.jpg ← 後零點（標記第二條線段）
+```
+
+**校正範例**：
+如果線段測量的實際位移是 4mm，整個物理群集按比例校正：
+```
+第469項: 0           (保持不變)
+第470項: 4 × (0.3/1.0) = 1.2mm
+第471項: 4 × (0.2/1.0) = 0.8mm
+第472項: 4 × (0.5/1.0) = 2.0mm
+第473項: 0           (保持不變)
+```
+
+### 智能校正公式
+```python
+def apply_physical_cluster_correction(physical_cluster, measured_displacement):
     """
-    校正一個位移群集的值
-    
+    對整個物理群集區間應用校正
+
     Args:
-        cluster_values: 原始群集位移值列表
-        measured_displacement: 測量的真實位移 (mm)
-    
+        physical_cluster: 物理群集物件（包含前後零點範圍）
+        measured_displacement: 基於線段平均的測量位移 (mm)
+
     Returns:
-        corrected_values: 校正後的位移值列表
+        bool: 是否成功應用校正（False表示視為雜訊）
     """
-    total_original = sum(abs(val) for val in cluster_values if val != 0)
-    if total_original == 0:
-        return cluster_values
-    
-    corrected_values = []
-    for val in cluster_values:
-        if val == 0:
-            corrected_values.append(0)
-        else:
-            # 按原始值的比例分配測量位移
-            ratio = abs(val) / total_original
-            corrected_val = measured_displacement * ratio
-            # 保持原始正負號
-            if val < 0:
-                corrected_val = -corrected_val
-            corrected_values.append(corrected_val)
-    
-    return corrected_values
+    # 雜訊檢測
+    min_threshold = (10.0 / scale_factor) * 0.1
+    if abs(measured_displacement) < min_threshold:
+        # 整個物理群集設為零
+        for i in range(physical_cluster.pre_zero_index,
+                      physical_cluster.post_zero_index + 1):
+            df.iloc[i, displacement_col_index] = 0.0
+        return False
+
+    # 獲取非零值並按比例分配
+    non_zero_values = get_non_zero_values_in_cluster(physical_cluster)
+    total_original = sum(abs(val) for val in non_zero_values)
+
+    for idx, original_val in zip(non_zero_indices, non_zero_values):
+        ratio = abs(original_val) / total_original
+        corrected_val = measured_displacement * ratio
+        # 保持原始正負號
+        if original_val < 0:
+            corrected_val = -corrected_val
+        df.iloc[idx, displacement_col_index] = corrected_val
+
+    return True
 ```
 
-## 技術需求
+## 技術架構
 
-### GUI 框架
-- **推薦**: Tkinter 或 PyQt5/6
-- **需求**: 
-  - 影片播放控制
-  - 自定義畫布繪製
-  - 滑鼠事件處理
-  - 鍵盤快捷鍵
+### GUI 框架與功能
+- **框架**: Tkinter (Python內建，跨平台相容)
+- **核心功能**:
+  - 影片幀顯示與縮放
+  - 滑鼠拖拽ROI選擇
+  - 精細線段標記
+  - 8倍放大顯示
+  - 完整鍵盤快捷鍵支援
+  - 暫存檔案選擇對話框
 
-### 核心功能模組
+### 檔案格式支援
 
-#### 1. 影片處理模組
-```python
-class VideoHandler:
-    def __init__(self, video_path, rotation_angle=0):
-        # 載入影片，應用旋轉
-    
-    def get_frame_at_time(self, timestamp):
-        # 獲取指定時戳的影片幀
-    
-    def apply_rotation(self, frame):
-        # 應用旋轉校正
-```
+#### 輸入格式
+- **CSV檔案**: `*.csv` (智能欄位檢測)
+  - 不帶前綴: `1.csv`, `2.csv`
+  - 清理後: `c1.csv`, `c2.csv`
+  - 已校正: `mc1.csv`, `mc2.csv`
+- **影片檔案**: `lifts/data/*.mp4`
+- **預匯出幀**: `lifts/exported_frames/{video_name}/*.jpg`
+- **暫存檔案**: `{csv_name}_temp_{timestamp}.json`
 
-#### 2. 數據管理模組
+#### 輸出格式
+- **校正CSV**: 統一使用 `mc` 前綴
+- **暫存JSON**: 包含完整工作狀態
+
+### 核心模組架構
+
+#### 1. 智能數據管理模組 (`DataManager`)
 ```python
 class DataManager:
-    def __init__(self, csv_path, scale_factor):
-        # 載入清理後的 CSV 和比例尺
-    
-    def find_non_zero_clusters(self):
-        # 識別所有非零值群集
-    
-    def get_correction_points(self):
-        # 獲取需要校正的時戳點
-    
-    def apply_correction(self, cluster_idx, measured_displacement):
-        # 應用校正到指定群集
+    def __init__(self, csv_path, video_name):
+        # 智能欄位檢測與CSV載入
+        self.displacement_column = self._find_displacement_column()
+        self.displacement_col_index = self.df.columns.get_loc(self.displacement_column)
+
+    def _find_displacement_column(self):
+        # 智能找到位移欄位：'displacement', '位移', 或按位置
+
+    def _identify_physical_clusters_from_png_tags(self):
+        # 基於frame_path欄位識別物理群集
+
+    def apply_physical_cluster_correction(self, physical_cluster, measured_displacement):
+        # 物理群集整體校正
 ```
 
-#### 3. GUI 控制模組
+#### 2. 高精度影片處理模組 (`VideoHandler`)
 ```python
-class CorrectionGUI:
-    def __init__(self, video_handler, data_manager):
-        # 初始化界面
-    
-    def show_full_frame(self, timestamp):
-        # 顯示完整幀供 ROI 選擇
-    
-    def show_roi_zoom(self, roi_rect, zoom_factor=4):
-        # 顯示放大的 ROI 區域
-    
-    def handle_roi_selection(self, event):
-        # 處理 ROI 選擇事件
-    
-    def handle_reference_point_click(self, event):
-        # 處理參考點標記事件
+class VideoHandler:
+    def __init__(self, video_path):
+        self.rotation_angle = rotation_config.get(self.video_name, 0)
+
+    def get_frame_at_index(self, frame_number):
+        # 精確幀號提取（3次重試機制）
+
+    def load_jpg_frame(self, jpg_filename):
+        # 載入預匯出JPG參考幀
+
+    def apply_rotation(self, frame):
+        # 旋轉校正整合
+```
+
+#### 3. 高精度校正界面 (`CorrectionApp`)
+```python
+class CorrectionApp:
+    def __init__(self, root, data_manager, video_handler):
+        self.zoom_factor = 8  # 8倍放大精度
+        self.max_annotations = 3  # 最多保留3次標註
+        self.line_annotations = [[], []]  # 多次標註記錄
+
+    def enter_precision_marking_mode(self):
+        # 8倍放大ROI顯示
+
+    def add_line_annotation(self, line):
+        # 多次標註記錄（延遲剔除）
+
+    def remove_outlier_annotations(self, line_index):
+        # 批量離群值剔除
+
+    def reset_to_first_line_annotation(self):
+        # 重新標註完整重置
+
+    def save_temporary_state(self):
+        # 暫存系統
+
+    def load_temporary_state(self, temp_data):
+        # 狀態恢復
 ```
 
 ## 使用者介面設計
 
 ### 主視窗佈局
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 檔案: 1.mp4 | 時戳: 46.9s | 群集: 1/15 | 模式: ROI選擇      │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│                    影片畫面區域                              │
-│                  (ROI選擇/放大顯示)                          │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│ 狀態: 請框選包含參考點的 ROI 區域                            │
-│ 快捷鍵: [N]ext  [B]ack  [S]ave  [Q]uit                     │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 半自動位移校正工具 - 1.mp4 | 群集 3/15 | 幀號: 1500→1494 | 時戳: 46.9s     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 檔案: 1.csv | 物理群集: 3/15 | ID: 003 | 運動點數: 8 | 使用JPG            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│                          影片畫面區域                                         │
+│                    (ROI選擇/8倍放大標記)                                      │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 階段2a: 8倍放大精細標記 - 請點擊第一條參考線段的起點 [已標註: 2/3] | 參考線段: 顯示 │
+│ 快捷鍵: [N]ext [B]ack [S]ave [Q]uit [H]ide線段 [R]epeat [Z]取消            │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 操作模式
-1. **ROI 選擇模式**: 拖拽選擇矩形區域
-2. **精細標記模式**: 點擊標記參考點 (4倍放大)
-3. **確認模式**: 按 'n' 確認並進入下一個點
+### 智能操作模式
+1. **ROI 選擇模式**: 滑鼠拖拽選擇矩形區域
+2. **8倍放大標記模式**: 超高精度線段標記
+3. **多次標註模式**: 支援無限次標註，延遲剔除離群值
+4. **暫存恢復模式**: 自動檢測並恢復工作狀態
 
-### 視覺回饋
-- **ROI 邊框**: 紅色虛線矩形
-- **參考點標記**: 綠色十字線 (4像素線寬)
-- **狀態指示**: 底部狀態列顯示當前操作提示
-- **進度指示**: 頂部顯示當前群集進度
+### 視覺回饋系統
+- **ROI 邊框**: 紅色虛線矩形 (5,5) dash pattern
+- **線段標記**:
+  - 綠色起點圓圈 + 白色十字
+  - 橙色終點圓圈 + 白色十字
+  - 青色第一條線段 (width=2)
+  - 黃色第二條線段 (width=2)
+  - 綠色連線 (width=6)
+- **參考線段控制**: [H] 鍵切換顯示/隱藏
+- **狀態指示**:
+  - 頂部資訊欄：檔案、群集、幀號資訊
+  - 底部狀態列：詳細操作提示和標註進度
+  - 視窗標題：當前處理狀態
 
 ## 輸出格式
 
-### 校正記錄檔案
-儲存為 JSON 格式，記錄每次校正的詳細資訊：
+### 暫存檔案 (JSON)
+工作未完成時自動生成，支援完整狀態恢復：
 ```json
 {
-    "video_file": "1.mp4",
-    "csv_file": "c1.csv",
-    "scale_factor": 86.2,
-    "corrections": [
-        {
-            "cluster_index": 0,
-            "start_timestamp": 46.9,
-            "end_timestamp": 47.3,
-            "reference_points": [
-                {"timestamp": 46.9, "pixel_coords": [320, 240]},
-                {"timestamp": 47.3, "pixel_coords": [320, 258]}
+    "metadata": {
+        "csv_file": "1.csv",
+        "csv_path": "D:/Lift_project/lifts/result/1.csv",
+        "video_file": "1.mp4",
+        "save_timestamp": "2024-12-15T14:30:25.123456",
+        "format_version": "1.0"
+    },
+    "progress": {
+        "current_cluster_index": 3,
+        "total_clusters": 15,
+        "current_phase": "line_marking_2",
+        "current_line_index": 1,
+        "current_point_in_line": 0
+    },
+    "settings": {
+        "map_frames_enabled": false,
+        "zoom_factor": 8,
+        "max_annotations": 3
+    },
+    "current_state": {
+        "roi_rect": [150, 200, 300, 250],
+        "show_reference_lines": true,
+        "line_annotations": [
+            [
+                {
+                    "timestamp": 46.9,
+                    "start_pixel_coords": [320, 240],
+                    "end_pixel_coords": [320, 258],
+                    "y_component": 18.0
+                }
             ],
-            "measured_displacement_mm": 2.1,
-            "original_values": [0, 0.3, 0.2, 0.5, 0],
-            "corrected_values": [0, 1.26, 0.84, 2.1, 0]
-        }
-    ],
-    "completion_time": "2025-09-21T15:30:00",
-    "total_clusters": 15,
-    "corrected_clusters": 8
+            []
+        ]
+    },
+    "csv_modifications": {
+        "completed_clusters": [
+            {
+                "cluster_index": 0,
+                "physical_cluster_id": 1,
+                "csv_row_range": [469, 473],
+                "modified_values": {
+                    "469": 0.0,
+                    "470": 1.2,
+                    "471": 0.8,
+                    "472": 2.0,
+                    "473": 0.0
+                }
+            }
+        ]
+    }
 }
 ```
 
-### 校正後的 CSV 檔案
-在原檔名基礎上加上 `_corrected` 後綴：
-- `c1.csv` → `c1_corrected.csv`
-- 保持原始格式，僅更新位移值
-
-## 開發優先順序
-
-### Phase 1: 核心功能 (必須)
-1. 影片載入與旋轉校正
-2. CSV 數據讀取與群集識別
-3. 基本 GUI 框架與影片顯示
-4. ROI 選擇功能
-
-### Phase 2: 標記功能 (必須)
-1. 放大顯示 ROI
-2. 精細十字線標記
-3. 座標記錄與計算
-4. 基本位移校正
-
-### Phase 3: 完整工作流 (必須)
-1. 群集間導航
-2. 批量處理邏輯
-3. 數據儲存功能
-4. 錯誤處理
-
-### Phase 4: 改善功能 (建議)
-1. 撤銷/重做功能
-2. 快捷鍵優化
-3. 批次處理多檔案
-4. 品質檢查工具
-
-## 注意事項
-
-### 數據一致性
-- 確保時戳與影片幀的準確對應
-- 驗證比例尺的正確性
-- 檢查旋轉校正的影響
-
-### 使用者體驗
-- 提供清晰的操作指引
-- 實作快捷鍵支援
-- 顯示進度和狀態資訊
-- 支援操作撤銷
-
-### 效能考量
-- 影片幀的快取機制
-- ROI 區域的即時渲染
-- 大型 CSV 檔案的處理
-
-### 錯誤處理
-- 檔案缺失或損壞
-- 比例尺配置錯誤
-- 使用者操作錯誤
-- 數據格式不匹配
+### 校正後CSV檔案
+統一命名規則，支援覆蓋：
+- **輸入**: `1.csv`, `c1.csv`, `mc1.csv`
+- **輸出**: `mc1.csv` (統一使用mc前綴)
+- **格式**: 保持原始CSV結構，僅更新位移欄位值
 
 ## 實作完成狀態
 
-✅ **核心功能已完成實作** (2025-09-21)
+✅ **完整功能已實作並部署** (2024-12-15)
 
-### 已實作的功能模組
+### 重大功能更新
 
-#### 1. 數據管理模組 (`DataManager`)
-- ✅ CSV 檔案讀取與解析
-- ✅ 非零值群集自動識別
-- ✅ 比例尺配置載入 (`scale_config.py`)
-- ✅ 位移校正演算法與比例換算
-- ✅ 雜訊檢測與過濾 (小於0.5像素閾值)
-- ✅ 校正後數據輸出為 `mc*.csv` 格式
+#### 1. 智能檔案處理系統
+- ✅ **多格式CSV支援**: `1.csv`, `c1.csv`, `mc1.csv` 全面兼容
+- ✅ **智能欄位檢測**: 自動識別 `displacement`, `displacement_mm`, `位移`
+- ✅ **統一輸出格式**: 所有校正結果統一使用 `mc` 前綴
+- ✅ **向下兼容**: 支援新舊CSV格式，自動回退到位置檢測
 
-#### 2. 影片處理模組 (`VideoHandler`)
-- ✅ 影片檔案載入與播放控制
-- ✅ 基於時戳的精確幀提取
-- ✅ 旋轉校正整合 (`rotation_config.py` + `rotation_utils.py`)
-- ✅ 座標系統轉換處理
+#### 2. 高精度標註系統
+- ✅ **8倍放大精度**: ROI區域8倍放大，極高精度標記
+- ✅ **多次標註支援**: 無限次標註，延遲到按N時才剔除離群值
+- ✅ **智能離群值處理**: 迭代剔除最遠離平均值的標註，保留最佳3個
+- ✅ **視覺遮擋控制**: [H]鍵切換參考線段顯示，避免干擾標記
 
-#### 3. GUI 校正界面 (`CorrectionApp`)
-- ✅ 完整的 Tkinter 圖形界面
-- ✅ ROI 拖拽選擇功能
-- ✅ 4倍放大精細標記模式
-- ✅ 綠色十字線標記 (4像素線寬對應原影像1像素)
-- ✅ 鍵盤快捷鍵支援 ([N]ext, [B]ack, [S]ave, [Q]uit)
-- ✅ 群集間自動導航
-- ✅ 實時狀態指示與進度顯示
+#### 3. 暫存恢復系統
+- ✅ **智能暫存檢測**: 啟動時自動搜尋 `{name}_temp_{timestamp}.json`
+- ✅ **多版本管理**: 支援多個暫存檔案選擇，顯示建立時間和進度
+- ✅ **完整狀態恢復**: 包括進度、標註記錄、CSV修改、界面設定
+- ✅ **工作流程保護**: 已完成群集數據完全不受重新標註影響
+
+#### 4. 位移比較警示系統
+- ✅ **智能檢測**: 人工值 < 程式估計值95% 時觸發警告
+- ✅ **三重選擇**: 使用程式估計值 / 重新標註 / 使用人工值
+- ✅ **完全重置**: 重新標註時完全回到第一條線段，清空所有記錄
+- ✅ **數據安全**: 已完成群集數據保持不變
+
+### 核心技術架構
+
+#### 數據管理模組 (`DataManager`)
+```python
+# 智能欄位檢測
+self.displacement_column = self._find_displacement_column()
+self.displacement_col_index = self.df.columns.get_loc(self.displacement_column)
+
+# 物理群集識別
+self.physical_clusters = self._identify_physical_clusters_from_png_tags()
+
+# 智能校正應用
+def apply_physical_cluster_correction(self, physical_cluster, measured_displacement):
+    # 雜訊檢測 + 比例分配 + 正負號保持
+```
+
+#### 高精度界面系統 (`CorrectionApp`)
+```python
+# 8倍放大系統
+self.zoom_factor = 8
+enlarged_roi = cv2.resize(roi_frame, None, fx=self.zoom_factor, fy=self.zoom_factor)
+
+# 多次標註管理
+self.line_annotations = [[], []]  # 兩條線段的多次標註記錄
+self.max_annotations = 3
+
+# 延遲離群值剔除
+def remove_outlier_annotations(self, line_index):
+    # 批量剔除直到保留最佳3個標註
+
+# 暫存系統
+def save_temporary_state(self) -> str:
+    # 完整狀態序列化到JSON
+def load_temporary_state(self, temp_data: dict):
+    # 完整狀態恢復
+```
 
 ### 使用方式
 
@@ -355,111 +460,82 @@ cd src
 uv run python manual_correction_tool.py
 ```
 
-#### 工作流程
-1. **選擇檔案**: 選擇清理後的 CSV 檔案 (如 `c1.csv`)
-2. **自動載入**: 系統自動載入對應的影片檔案和配置
-3. **ROI 選擇**: 在第一個標記點拖拽選擇 ROI 區域
-4. **精細標記**: 在4倍放大視圖中點擊標記參考點
-5. **確認標記**: 按 `N` 確認並移至第二個標記點
-6. **自動校正**: 完成兩點標記後自動計算並應用校正
-7. **繼續處理**: 自動移至下一個群集，重複流程
-8. **儲存結果**: 完成後按 `S` 儲存為 `mc*.csv` 檔案
+#### 完整工作流程
+1. **智能檔案選擇**: 選擇任何格式的CSV檔案 (`1.csv`, `c1.csv`, `mc1.csv`)
+2. **暫存檢測**: 系統自動檢測暫存檔案，提供恢復選項
+3. **狀態恢復**: 載入暫存狀態或從頭開始
+4. **JPG優先導航**: 優先使用預匯出JPG，回退到影片幀
+5. **ROI選擇**: 拖拽選擇包含參考特徵的區域
+6. **8倍放大標記**: 超高精度多次線段標註
+7. **智能校正**: 平均線段計算 + 位移比較警示
+8. **智能儲存**: 工作未完成時提供暫存選項
 
-#### 快捷鍵操作
-- `N` (Next): 確認當前標記，進入下一步
-- `B` (Back): 返回上一步或上一個群集
-- `S` (Save): 儲存校正結果
-- `Q` (Quit): 退出應用程式
+#### 全面快捷鍵支援
+- `N`: 進入下一步（執行離群值剔除）
+- `B`: 返回上一步或上一個群集
+- `S`: 智能儲存（完成時儲存CSV，未完成時提供暫存選項）
+- `Q`: 退出應用程式
+- `H`: 切換參考線段顯示/隱藏
+- `R`: 重複標註當前線段
+- `Z`: 取消最後一次標註
 
 ### 輸出格式
 
-校正後的檔案命名規則：
-- 輸入: `c1.csv` (清理後)
-- 輸出: `mc1.csv` (清理+手動校正後)
+#### 暫存檔案
+- **檔名**: `{csv_name}_temp_{timestamp}.json`
+- **內容**: 完整工作狀態，包括進度、標註、CSV修改
+- **恢復**: 自動檢測，多版本選擇
 
-### 技術特性
+#### 最終CSV檔案
+- **統一命名**: 所有輸入格式統一輸出為 `mc{name}.csv`
+- **完整兼容**: 支援覆蓋已有校正檔案
 
-#### 精度控制
-- **座標精度**: 像素級別精確定位
-- **線寬設計**: 4像素線寬對應原影像1像素
-- **雜訊過濾**: 小於0.5像素位移自動視為雜訊
+### 技術突破
 
-#### 座標系統
-- **Y軸方向**: 向上為正 (符合物理定義)
-- **旋轉處理**: 剛性旋轉，保持尺寸和比例
-- **多重座標**: 畫布↔ROI↔原影像 座標自動轉換
-
-#### 比例換算
-```python
-# 位移計算公式
-pixel_diff_y = point1.y - point2.y  # 向上為正
-displacement_mm = (pixel_diff_y * 10.0) / scale_factor
-```
-
-#### 校正演算法
-```python
-# 比例分配校正
-for original_val in cluster:
-    ratio = abs(original_val) / total_original
-    corrected_val = measured_displacement * ratio
-    if original_val < 0:
-        corrected_val = -corrected_val
-```
-
-### 錯誤處理
-
-- ✅ 檔案缺失檢測
-- ✅ 比例尺配置驗證  
-- ✅ 影片幀提取失敗處理
-- ✅ ROI 大小驗證 (最小50×50像素)
-- ✅ 座標邊界檢查
-- ✅ 雜訊位移自動過濾
-- ✅ **設備故障檢測** - 第一行即有位移的智能處理
-
-### 設備故障處理
-
-當檢測到檔案從第一行就開始有位移時（通常表示設備故障），系統會：
-
-1. **自動識別**: 檢測無前零點的異常群集
-2. **顯示畫面**: 展示故障發生時的影片幀
-3. **提供選項**: 
-   - **清零**: 將整個故障群集設為 0（推薦）
-   - **跳過**: 保持原值但不進行校正
-   - **檢視**: 返回畫面進一步檢查
-4. **繼續流程**: 自動移至下一個正常群集
-
-這確保了即使遇到設備故障也能繼續完成校正工作。
+1. **智能檔案處理**: 完全消除檔案格式限制
+2. **延遲離群值剔除**: 允許無限標註，提升標記靈活性
+3. **完整狀態暫存**: 支援長期工作中斷和恢復
+4. **位移比較警示**: 防止明顯錯誤的測量結果
+5. **數據完整性保護**: 已完成工作絕對安全
 
 ### 依賴套件
 
 ```toml
 dependencies = [
     "opencv-python",
-    "numpy", 
+    "numpy",
     "pandas",
     "pillow",
-    "tkinter"  # 通常內建於Python
+    "tkinter",  # Python內建
+    "pathlib"   # Python內建
 ]
 ```
 
-這個工作流程將大幅提升位移檢測的準確性，通過人工校正提供高品質的 ground truth 數據。
-
 ## 開發完成總結
 
-半自動人工校正工具已完整實作並可投入使用。主要成果：
+半自動人工校正工具已達到生產就緒狀態，實現了以下重大突破：
 
-1. **完整GUI工作流**: 從檔案選擇到結果輸出的全自動流程
-2. **極高精度標記**: 8倍放大 + 3次標註平均 + 離群值剔除
-3. **智能JPG系統**: 物理群集檢測 + 預匯出幀 + 83.8%空間節省
-4. **智能校正算法**: 自動比例分配 + 位移比較警示 + 可疑值檢測
-5. **使用者友善**: 直觀的視覺界面 + 全面快捷鍵操作 + 視覺遮擋控制
-6. **數據一致性**: 完整的座標轉換 + 多格式相容 + 物理群集準確性
-7. **錯誤處理**: 全面的異常檢測 + 智能回退機制 + 用戶確認流程
+### 🎯 **完整功能覆蓋**
+- **多格式兼容**: 支援所有CSV格式，智能欄位檢測
+- **暫存系統**: 完整的工作狀態保存和恢復
+- **高精度標註**: 8倍放大 + 多次標註 + 智能離群值處理
+- **智能校正**: 位移比較警示 + 完全重置機制
 
-**技術突破**：
-- 物理群集標籤系統提供精確的運動邊界定位
-- 多次標註平均機制大幅提升測量準確性
-- JPG預匯出系統解決幀導航精度問題
-- 位移比較警示防止明顯錯誤的標註結果
+### 🚀 **使用者體驗優化**
+- **一鍵啟動**: 自動檢測暫存，無縫恢復工作
+- **視覺控制**: 參考線段顯示控制，避免標記干擾
+- **靈活標註**: 無限次標註，延遲品質控制
+- **智能儲存**: 自動判斷完成狀態，提供合適的儲存選項
 
-使用者現在可以高效且高精度地進行位移數據的手動校正，實現了檢測精度的重大提升。
+### 🛡️ **數據安全保障**
+- **工作保護**: 已完成群集數據絕對安全
+- **狀態隔離**: 重新標註只影響當前群集
+- **容錯機制**: 全面的錯誤處理和自動回退
+
+### 📈 **精度提升**
+- **8倍放大**: 像素級精確定位
+- **多次平均**: 自動剔除離群標註
+- **物理群集**: 基於真實運動邊界的精確校正
+- **比較警示**: 防止明顯測量錯誤
+
+這個工具現在可以高效處理大規模的位移校正工作，為電梯位移檢測提供高品質的ground truth數據。
