@@ -4,12 +4,9 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 sys.path.append("src/")
 import cv2
 import warnings
-import utils
 import datetime
 import pandas as pd
 import numpy as np
-from scipy.stats import ttest_1samp
-from sklearn.cluster import KMeans
 from multiprocessing import Pool
 from config import Config, video_config
 try:
@@ -93,17 +90,17 @@ warnings.filterwarnings('ignore')
 # Parameters and objects
 DATA_FOLDER = Config['files']['data_folder']
 feature_detector = cv2.ORB.create(nfeatures=100)
-feature_matcher = cv2.BFMatcher.create(normType=cv2.NORM_HAMMING, crossCheck=True)
-cluster = KMeans(n_clusters=2, random_state=0)
+feature_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)  # 改為與測試程式一致
 FRAME_INTERVAL = Config['scan_setting']['interval']
 ROI_RATIO = 0.6
-# 檢測參數（像素域）
-EFFECT_MIN_PX = 1.0
+# 檢測參數（像素域）- 簡化為測試程式的參數
+EFFECT_MIN_PX = 1.5  # 對應測試程式的 MOTION_MIN_DISPLACEMENT
 PAIR_TOLERANCE_PX = 1.0
 JITTER_MAX_PX = 1.0
 EXIT_ZERO_LEN = 3
 REVERSAL_PERSIST_R = 2
-MIN_MATCHES = 6
+MIN_MATCHES = 8  # 對應測試程式的 MOTION_MIN_MATCHES
+LOWE_RATIO = 0.75  # Lowe's ratio test 閾值
 
 
 # create necessary folders
@@ -208,46 +205,50 @@ def scan(video_path, file_name):
             kp_pair_lines = []
 
             if feature_descrpitor1 is not None and feature_descrpitor2 is not None:
-                matches = feature_matcher.match(feature_descrpitor2, feature_descrpitor1)
-                paired_keypoints_info_array = []
+                # 使用 knnMatch + Lowe's ratio test（與測試程式一致）
+                matches = feature_matcher.knnMatch(feature_descrpitor1, feature_descrpitor2, k=2)
 
-                for match_info in matches:
-                    kp1_idx = match_info.trainIdx
-                    kp2_idx = match_info.queryIdx
-                    kp1_coord = np.array(keypoint_list1[kp1_idx].pt, dtype=int)
-                    kp2_coord = np.array(keypoint_list2[kp2_idx].pt, dtype=int)
-                    paired_keypoints_info_array.append([
-                        kp2_idx, 
-                        kp1_idx, 
-                        np.sqrt(np.sum((kp1_coord - kp2_coord)**2)),
-                        kp2_coord[0]-kp1_coord[0], # horizontal travel distance
-                        kp2_coord[1]-kp1_coord[1], # vertical travel distance
-                    ])
+                # Lowe's ratio test
+                good_matches = []
+                for m_n in matches:
+                    if len(m_n) == 2:
+                        m, n = m_n
+                        if m.distance < LOWE_RATIO * n.distance:
+                            good_matches.append(m)
 
-                paired_keypoints_info_array = np.array(paired_keypoints_info_array)
-                paired_keypoints_info_array = paired_keypoints_info_array[utils.remove_outlier_idx(paired_keypoints_info_array[:, 2], 'upper')]
+                if len(good_matches) >= MIN_MATCHES:
+                    # 計算所有匹配的垂直位移
+                    vertical_displacements = []
+                    display_keypoints = []
+                    kp_pair_lines = []
 
-                if paired_keypoints_info_array.shape[0] >= MIN_MATCHES:
-                    
-                    display_keypoints = [keypoint_list2[kp2_idx] for kp2_idx in paired_keypoints_info_array[:, 0].astype(int)]
-                    kp_pair_lines = [(np.array(keypoint_list1[int(kp1_idx)].pt, dtype=int), np.array(keypoint_list2[int(kp2_idx)].pt, dtype=int)) \
-                                     for kp2_idx, kp1_idx in paired_keypoints_info_array[:, :2]]
-                    camera_pan = ttest_1samp(paired_keypoints_info_array[:, 3], 0).pvalue < 0.001
-                    group_idx_array = cluster.fit_predict(paired_keypoints_info_array[:, 2].reshape(-1, 1))
+                    for m in good_matches:
+                        kp1 = keypoint_list1[m.queryIdx]
+                        kp2 = keypoint_list2[m.trainIdx]
 
-                    if len(set(group_idx_array)) > 1 and camera_pan == False:
-                        group0_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==0)[0], 4]
-                        group1_v_travel_array = paired_keypoints_info_array[np.where(group_idx_array==1)[0], 4]
+                        # 計算垂直位移 (OpenCV 座標：向下為正，向上為負)
+                        dy = kp2.pt[1] - kp1.pt[1]
+                        vertical_displacements.append(dy)
 
-                        group0_v_travel = np.median(group0_v_travel_array) if ttest_1samp(group0_v_travel_array, 0).pvalue < 0.0001 else 0
-                        group1_v_travel = np.median(group1_v_travel_array) if ttest_1samp(group1_v_travel_array, 0).pvalue < 0.0001 else 0
+                        display_keypoints.append(kp2)
+                        kp_pair_lines.append((
+                            np.array(kp1.pt, dtype=int),
+                            np.array(kp2.pt, dtype=int)
+                        ))
 
-                        if abs(group0_v_travel) > abs(group1_v_travel):
-                            vertical_travel_distance = int(group1_v_travel - group0_v_travel)
-                        else:
-                            vertical_travel_distance = int(group0_v_travel - group1_v_travel)
-                    else:
-                        vertical_travel_distance = 0
+                    # 計算中位數位移
+                    median_dy = np.median(vertical_displacements)
+
+                    # 符號反轉：向上移動 = 正值（使用者期望）
+                    # OpenCV: 向下為正 → 我們需要反轉
+                    vertical_travel_distance = int(-median_dy)
+
+                    # camera_pan 檢測（簡化版：檢查水平位移）
+                    horizontal_displacements = [kp2.pt[0] - kp1.pt[0]
+                                               for m in good_matches
+                                               for kp1, kp2 in [(keypoint_list1[m.queryIdx], keypoint_list2[m.trainIdx])]]
+                    median_dx = np.median(horizontal_displacements)
+                    camera_pan = abs(median_dx) > 5.0  # 水平移動超過 5 pixels 視為 pan
 
             # ===== 暗房邏輯反轉：只處理暗房區間，非暗房填 0 =====
             # is_darkroom 已在前面判定（line 187）
@@ -272,7 +273,7 @@ def scan(video_path, file_name):
             if not is_darkroom:
                 # 非暗房：強制回到 Idle 狀態，不累計群集（反轉邏輯）
                 if state == 'InCluster':
-                    # 在群內時離開暗房 → 強制出群，post 用離開前最後一個暗房幀
+                    # 在群內時離開暗房 → 強制出群，post 用離開前最後一個暗房幀（已經是 frame_enhanced_bgr）
                     if last_darkroom_frame is not None and current_cluster_id:
                         post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
                         export_frame_jpg(last_darkroom_frame, post_name, video_name)
@@ -377,7 +378,7 @@ def scan(video_path, file_name):
                         # 匯出 pre（若尚未匯出）與 post
                         if current_cluster_id:
                             post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
-                            export_frame_jpg((frame_idx, frame), post_name, video_name)
+                            export_frame_jpg((frame_idx, frame_enhanced_bgr), post_name, video_name)
                             if pending_pre_export is not None:
                                 export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
                                 pending_pre_export = None

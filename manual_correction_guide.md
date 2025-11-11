@@ -29,15 +29,21 @@
 2. **暫存檢測**: 自動搜尋同名暫存檔案 (`{name}_temp_{timestamp}.json`)
 3. **暫存選擇**: 多個暫存檔案時提供選擇介面，顯示建立時間和進度
 4. **狀態恢復**: 載入暫存狀態，包括進度、標註記錄、CSV修改
-5. **欄位智能檢測**: 自動識別位移欄位 (`displacement`, `displacement_mm`, `位移`)
-6. **載入配置**: 比例尺、旋轉角度、物理群集標籤
-7. **預匯出幀檢測**: 檢查 `lifts/exported_frames/{video_name}/` 目錄
+5. **欄位智能檢測**: 
+   - **位移欄位**: 自動識別順序 → `displacement` / `displacement_mm` / `位移` / `位移_mm` → 第3欄（按位置）
+   - **時間軸欄位**: 檢測 `second` 欄位（時戳，必需）和 `frame_idx` 欄位（幀號，用於顯示）
+   - **群集標籤**: 檢測 `frame_path` 欄位（物理群集標籤系統必需，缺少則報錯）
+6. **載入配置**: 比例尺 (`scale_config`)、旋轉角度 (`rotation_config`)、物理群集標籤
+7. **預匯出幀檢測**: 檢查 `lifts/exported_frames/{video_name}/` 目錄中的JPG參考幀
 
-### 階段 1: 智能導航與JPG載入
-- **物理群集優先**: 基於 `frame_path` 欄位的 JPG 標籤進行精確導航
+### 階段 1: JPG檔案加載（必需）
+- **JPG檔案必需**: 工具要求必須擁有所有物理群集的JPG參考幀
+  - `frame_path` 格式: `pre_cluster_XXX.jpg` 或 `post_cluster_XXX.jpg`（XXX為群集序號)
+  - 自動識別前零點（`pre_cluster_*`）和後零點（`post_cluster_*`）
+  - 缺少JPG檔案會報錯並停止執行
 - **JPG檔案路徑**: `lifts/exported_frames/{video_name}/pre_cluster_XXX.jpg`
-- **自動回退**: JPG不可用時回退到影片幀載入
-- **精確定位**: 使用預匯出的物理群集邊界，不是清理後邊界
+- **旋轉校正整合**: JPG加載時自動應用 `rotation_config` 設定的旋轉角度
+- **精確定位**: 使用預匯出的物理群集邊界進行高精度標記
 - **完整資訊**: 顯示群集ID、運動點數、檔案來源
 
 ### 階段 2: ROI 選擇與驗證
@@ -210,8 +216,11 @@ def apply_physical_cluster_correction(physical_cluster, measured_displacement):
   - 不帶前綴: `1.csv`, `2.csv`
   - 清理後: `c1.csv`, `c2.csv`
   - 已校正: `mc1.csv`, `mc2.csv`
+  - **必需欄位**: 需要包含 `frame_path` 欄位（用於物理群集標籤）
+  - **位移欄位**: 自動檢測以下順序 → `displacement` / `displacement_mm` / `位移` / `位移_mm` → 第3欄（按位置）
+  - **時間軸欄位**: 需要 `second` 欄位（時戳）、`frame_idx` 欄位（幀號，可選用於精確提取）
 - **影片檔案**: `lifts/data/*.mp4`
-- **預匯出幀**: `lifts/exported_frames/{video_name}/*.jpg`
+- **預匯出幀**: `lifts/exported_frames/{video_name}/*.jpg` (物理群集參考幀)
 - **暫存檔案**: `{csv_name}_temp_{timestamp}.json`
 
 #### 輸出格式
@@ -238,26 +247,23 @@ class DataManager:
         # 物理群集整體校正
 ```
 
-#### 2. 高精度影片處理模組 (`VideoHandler`)
+#### 2. JPG檔案處理模組 (`JPGHandler`)
 ```python
-class VideoHandler:
-    def __init__(self, video_path):
-        self.rotation_angle = rotation_config.get(self.video_name, 0)
-
-    def get_frame_at_index(self, frame_number):
-        # 精確幀號提取（3次重試機制）
+class JPGHandler:
+    def __init__(self, video_name):
+        # JPG處理器初始化（不需要視頻檔案）
+        self.video_name = video_name
+        self.rotation_angle = rotation_config.get(video_name, 0)
 
     def load_jpg_frame(self, jpg_filename):
         # 載入預匯出JPG參考幀
-
-    def apply_rotation(self, frame):
-        # 旋轉校正整合
+        # 應用旋轉校正（如果有設定）
 ```
 
 #### 3. 高精度校正界面 (`CorrectionApp`)
 ```python
 class CorrectionApp:
-    def __init__(self, root, data_manager, video_handler):
+    def __init__(self, root, data_manager, jpg_handler):
         self.zoom_factor = 8  # 8倍放大精度
         self.max_annotations = 3  # 最多保留3次標註
         self.line_annotations = [[], []]  # 多次標註記錄
@@ -409,11 +415,11 @@ class CorrectionApp:
 - ✅ **完整狀態恢復**: 包括進度、標註記錄、CSV修改、界面設定
 - ✅ **工作流程保護**: 已完成群集數據完全不受重新標註影響
 
-#### 4. 位移比較警示系統
-- ✅ **智能檢測**: 人工值 < 程式估計值95% 時觸發警告
-- ✅ **三重選擇**: 使用程式估計值 / 重新標註 / 使用人工值
-- ✅ **完全重置**: 重新標註時完全回到第一條線段，清空所有記錄
-- ✅ **數據安全**: 已完成群集數據保持不變
+#### 4. JPG檔案必需系統
+- ✅ **嚴格要求**: 所有物理群集必須擁有對應的JPG參考幀
+- ✅ **清晰報錯**: 缺少JPG檔案時立即報錯，不進行任何回退操作
+- ✅ **簡化流程**: 移除了幀映射和視頻幀回退的複雜邏輯
+- ✅ **數據完整性**: 確保只使用經過驗證的高精度JPG參考幀
 
 ### 核心技術架構
 
@@ -462,13 +468,16 @@ uv run python manual_correction_tool.py
 
 #### 完整工作流程
 1. **智能檔案選擇**: 選擇任何格式的CSV檔案 (`1.csv`, `c1.csv`, `mc1.csv`)
-2. **暫存檢測**: 系統自動檢測暫存檔案，提供恢復選項
-3. **狀態恢復**: 載入暫存狀態或從頭開始
-4. **JPG優先導航**: 優先使用預匯出JPG，回退到影片幀
-5. **ROI選擇**: 拖拽選擇包含參考特徵的區域
-6. **8倍放大標記**: 超高精度多次線段標註
-7. **智能校正**: 平均線段計算 + 位移比較警示
-8. **智能儲存**: 工作未完成時提供暫存選項
+2. **檔案驗證**: 檢查CSV是否包含 `frame_path` 欄位和物理群集資訊
+3. **JPG驗證**: 確認所有物理群集JPG檔案已匯出到 `lifts/exported_frames/{video_name}/`
+4. **暫存檢測**: 系統自動檢測暫存檔案，提供恢復選項
+5. **狀態恢復**: 載入暫存狀態或從頭開始
+6. **初始化JPG處理器**: 直接初始化JPG處理器（不需要檢查MP4檔案）
+7. **JPG加載**: 加載預匯出JPG進行高精度標記（缺少JPG會報錯）
+8. **ROI選擇**: 拖拽選擇包含參考特徵的區域
+9. **8倍放大標記**: 超高精度多次線段標註
+10. **智能校正**: 平均線段計算 + 位移比較警示
+11. **智能儲存**: 工作未完成時提供暫存選項
 
 #### 全面快捷鍵支援
 - `N`: 進入下一步（執行離群值剔除）
@@ -495,8 +504,41 @@ uv run python manual_correction_tool.py
 1. **智能檔案處理**: 完全消除檔案格式限制
 2. **延遲離群值剔除**: 允許無限標註，提升標記靈活性
 3. **完整狀態暫存**: 支援長期工作中斷和恢復
-4. **位移比較警示**: 防止明顯錯誤的測量結果
+4. **嚴格必需驗證**: JPG檔案和CSV欄位必需，缺少立即報錯
 5. **數據完整性保護**: 已完成工作絕對安全
+
+### 必需配置文件
+
+```python
+# src/scale_config.py - 比例尺配置
+scale_config = {
+    "1.mp4": 150.5,      # 10mm 對應的像素數
+    "2.mp4": 148.3,
+    # ... 更多影片
+}
+
+# src/rotation_config.py - 旋轉校正配置
+rotation_config = {
+    "1.mp4": 0,          # 旋轉角度（度數），0=無旋轉
+    "2.mp4": -90,        # -90=逆時針90度
+    # ... 更多影片
+}
+```
+
+### 必需CSV欄位
+
+| 欄位名稱 | 型別 | 說明 | 可選性 |
+|---------|------|------|--------|
+| `frame_path` | str | 物理群集標籤（如 `pre_cluster_001.jpg`） | ❌ **必需** |
+| `second` | float | 時間戳（秒） | ❌ 必需 |
+| `frame_idx` | int | 影片幀號（用於顯示） | ✅ 可選 |
+| `displacement` 或 `displacement_mm` 或 `位移` | float | 位移值 (mm) | ❌ 必需 |
+| 其他欄位 | - | 自動保留 | ✅ 可選 |
+
+**關鍵需求**:
+- ⚠️ **缺少 `frame_path` 欄位時工具會報錯並停止執行**（物理群集標籤系統的核心需求）
+- ⚠️ **缺少任何 JPG 檔案時工具會報錯並停止執行**（必須先執行 frame export 功能）
+- ✅ `frame_idx` 欄位用於在控制台顯示幀號信息，不是必需的
 
 ### 依賴套件
 
@@ -526,11 +568,13 @@ dependencies = [
 - **視覺控制**: 參考線段顯示控制，避免標記干擾
 - **靈活標註**: 無限次標註，延遲品質控制
 - **智能儲存**: 自動判斷完成狀態，提供合適的儲存選項
+- **清晰驗證**: 啟動時明確驗證必需的JPG檔案和CSV欄位，避免中途失敗
+- **快速啟動**: 移除MP4檔案檢查，直接初始化JPG處理器，啟動更快
 
 ### 🛡️ **數據安全保障**
 - **工作保護**: 已完成群集數據絕對安全
 - **狀態隔離**: 重新標註只影響當前群集
-- **容錯機制**: 全面的錯誤處理和自動回退
+- **嚴格驗證**: 缺少必需檔案/欄位時立即報錯，杜絕隱患
 
 ### 📈 **精度提升**
 - **8倍放大**: 像素級精確定位

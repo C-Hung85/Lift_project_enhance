@@ -18,6 +18,8 @@ scale_config = {
     '21.mp4': 76.029995,
     '22.mp4': 30.905955,
     '23.mp4': 39.198454,
+    '26.mp4': 44.000000,
+    '27.mp4': 44.000000,
     '28.mp4': 53.000000,
     '29.mp4': 59.600000,
     '3.mp4': 73.800000,
@@ -49,4 +51,4 @@ scale_config = {
 CACHE_VERSION = "1.0"
 
 # 快取資訊
-CACHE_INFO = {'last_updated': '2025-09-21T14:02:38.487483', 'total_videos': 40, 'directory_hash': '6e48ad27b70ae718f78ea92cd15e29eb', 'processed_images': 200, 'error_count': 0, 'rotation_warnings': 0, 'build_method': 'pre_build'}
+CACHE_INFO = {'last_updated': '2025-11-11T18:37:53.786390', 'total_videos': 42, 'directory_hash': '5b2b65e5b8518e26a6556a0692ba7eb3', 'processed_images': 210, 'error_count': 0, 'rotation_warnings': 0, 'build_method': 'pre_build'}

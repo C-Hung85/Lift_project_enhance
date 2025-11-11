@@ -31,20 +31,6 @@ except ImportError:
 
 from rotation_utils import rotate_frame
 
-# --- Helper: optional affine frame mapping (main_frame -> source_frame) ---
-def map_frame_index(main_frame_index: int, intercept: float, slope: float) -> int:
-    """將主程式/CSV 幀號映射為原檔時基幀號。
-
-    Args:
-        main_frame_index: 來自 CSV/inspection 的幀號
-        intercept: 仿射截距（預設建議 318）
-        slope: 仿射斜率（預設建議 0.9946）
-    Returns:
-        以原檔時間軸估計的整數幀號
-    """
-    mapped = intercept + slope * float(main_frame_index)
-    return int(round(mapped))
-
 @dataclass
 class CorrectionCluster:
     """位移校正群集數據結構"""
@@ -72,11 +58,11 @@ class PhysicalCluster:
 class ReferenceLine:
     """參考線段數據結構"""
     timestamp: float
-    start_pixel_coords: Tuple[int, int]  # 線段起點 (x, y) 在原始影片中的座標
-    end_pixel_coords: Tuple[int, int]    # 線段終點 (x, y) 在原始影片中的座標
+    start_pixel_coords: Tuple[float, float]  # 線段起點 (x, y) 在原始影片中的座標
+    end_pixel_coords: Tuple[float, float]    # 線段終點 (x, y) 在原始影片中的座標
     csv_index: int
-    start_roi_coords: Tuple[int, int]    # 線段起點在ROI中的座標
-    end_roi_coords: Tuple[int, int]      # 線段終點在ROI中的座標
+    start_roi_coords: Tuple[float, float]    # 線段起點在ROI中的座標
+    end_roi_coords: Tuple[float, float]      # 線段終點在ROI中的座標
     
     @property
     def y_component(self) -> float:
@@ -114,6 +100,15 @@ class DataManager:
 
         if self.scale_factor is None:
             raise ValueError(f"找不到影片 {video_name} 的比例尺配置")
+        
+        # 檢查是否有 frame_path 欄位（新的物理群集標籤系統）
+        self.has_frame_path = 'frame_path' in self.df.columns
+        if self.has_frame_path:
+            print("✅ 偵測到 'frame_path' 欄位，使用物理群集標籤系統。")
+            self.physical_clusters = self._identify_physical_clusters_from_png_tags()
+            self.clusters = self._convert_physical_to_correction_clusters()
+        else:
+            raise ValueError("CSV 檔案缺少 'frame_path' 欄位。此工具僅支援新版格式。")
 
     def _find_displacement_column(self) -> str:
         """智能找到位移欄位"""
@@ -123,6 +118,8 @@ class DataManager:
             'displacement_mm',  # 帶單位的名稱
             '位移',  # 中文名稱
             '位移_mm',  # 中文帶單位
+            'vertical_travel_distance (mm)',  # lift_travel_detection 輸出格式
+            'v_travel_distance',  # 縮寫版本
         ]
 
         # 首先嘗試按名稱匹配
@@ -145,15 +142,6 @@ class DataManager:
             f"請確保CSV包含位移數據欄位"
         )
 
-        # 檢查是否有 frame_path 欄位（新的物理群集標籤系統）
-        self.has_frame_path = 'frame_path' in self.df.columns
-        if self.has_frame_path:
-            print("✅ 偵測到 'frame_path' 欄位，使用物理群集標籤系統。")
-            self.physical_clusters = self._identify_physical_clusters_from_png_tags()
-            self.clusters = self._convert_physical_to_correction_clusters()
-        else:
-            raise ValueError("CSV 檔案缺少 'frame_path' 欄位。此工具僅支援新版格式。")
-
     def _identify_physical_clusters_from_png_tags(self) -> List[PhysicalCluster]:
         """基於PNG標籤識別物理群集 - 極其簡化的邏輯"""
         physical_clusters = []
@@ -161,6 +149,10 @@ class DataManager:
         # 尋找所有前0點標籤
         for i, row in self.df.iterrows():
             frame_path = row.get('frame_path', '')
+            
+            # 跳過 NaN 值和空字符串
+            if not isinstance(frame_path, str) or not frame_path:
+                continue
 
             if frame_path.startswith('pre_cluster_'):
                 # 提取群集序號
@@ -284,22 +276,22 @@ class DataManager:
         
         return displacement_mm
     
-    def calculate_displacement(self, point1: ReferencePoint, point2: ReferencePoint) -> float:
+    def calculate_displacement(self, line1: ReferenceLine, line2: ReferenceLine) -> float:
         """
-        計算兩個參考點之間的實際位移 (mm) - 保持向後兼容
+        計算兩條參考線段之間的實際位移 (mm) - 保持向後兼容
         
         Args:
-            point1: 第一個參考點 (群集前零點)
-            point2: 第二個參考點 (群集結束點)
+            line1: 第一條參考線段 (群集前零點)
+            line2: 第二條參考線段 (群集結束點)
             
         Returns:
             實際位移 (mm)，向上為正
         """
-        # 計算Y軸像素差值 (注意：影像座標系Y軸向下為正)
-        pixel_diff_y = point1.pixel_coords[1] - point2.pixel_coords[1]  # 向上為正
+        # 計算Y分量的差異
+        y_component_diff = line2.y_component - line1.y_component
         
         # 轉換為毫米 (scale_factor 代表10mm對應的像素數)
-        displacement_mm = (pixel_diff_y * 10.0) / self.scale_factor
+        displacement_mm = (y_component_diff * 10.0) / self.scale_factor
         
         return displacement_mm
     
@@ -396,107 +388,35 @@ class DataManager:
         
         return str(new_path)
 
-class VideoHandler:
-    """影片處理模組"""
+class JPGHandler:
+    """JPG檔案處理模組"""
     
-    def __init__(self, video_path: str):
-        self.video_path = video_path
-        self.video_name = Path(video_path).name
-        self.cap = cv2.VideoCapture(video_path)
+    def __init__(self, video_name: str):
+        """
+        初始化JPG處理器
         
-        if not self.cap.isOpened():
-            raise ValueError(f"無法開啟影片檔案: {video_path}")
+        Args:
+            video_name: 影片名稱（如 '1.mp4'），用於查找JPG檔案目錄
+        """
+        self.video_name = video_name
+        self.video_base_name = os.path.splitext(video_name)[0]
+        self.rotation_angle = rotation_config.get(video_name, 0)
         
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.rotation_angle = rotation_config.get(self.video_name, 0)
-        
-        print(f"影片載入成功: {self.video_name}")
-        print(f"FPS: {self.fps}, 總幀數: {self.total_frames}")
+        print(f"✅ JPG處理器初始化成功: {self.video_name}")
         if self.rotation_angle != 0:
-            print(f"旋轉角度: {self.rotation_angle}°")
-
-    def get_frame_at_index(self, frame_number) -> Optional[np.ndarray]:
-        """獲取指定幀號的影片幀"""
-        # 確保幀號是整數
-        frame_number = int(frame_number)
-        
-        print(f"\n=== 精確幀號提取 ===")
-        print(f"目標幀號: {frame_number} (整數轉換)")
-        print(f"影片FPS: {self.fps:.3f}")
-        print(f"總幀數: {self.total_frames}")
-        print(f"對應時戳: {frame_number / self.fps:.6f}s")
-        
-        if frame_number >= self.total_frames:
-            print(f"❌ 錯誤: 幀號 {frame_number} 超出範圍 (總幀數: {self.total_frames})")
-            return None
-        
-        if frame_number < 0:
-            print(f"❌ 錯誤: 幀號 {frame_number} 不能為負數")
-            return None
-        
-        success = False
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            actual_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-            position_error = abs(actual_pos - frame_number)
-            print(f"嘗試 {attempt+1}: 設置幀位置 目標={frame_number}, 實際={int(actual_pos)}, 誤差={position_error:.1f}")
-            
-            if position_error < 1:
-                ret, frame = self.cap.read()
-                if ret:
-                    print(f"✅ 成功讀取幀 {frame_number} (嘗試 {attempt+1})")
-                    success = True
-                    break
-                else:
-                    print(f"❌ 幀位置正確但讀取失敗 (嘗試 {attempt+1})")
-            else:
-                print(f"⚠️ 幀位置誤差過大 (嘗試 {attempt+1})")
-            
-            print(f"🔄 重置 VideoCapture (嘗試 {attempt+1})")
-            self.cap.release()
-            self.cap = cv2.VideoCapture(self.video_path)
-        
-        if not success:
-            print("🔄 使用全新 VideoCapture 最後重試...")
-            temp_cap = cv2.VideoCapture(self.video_path)
-            temp_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            actual_final = temp_cap.get(cv2.CAP_PROP_POS_FRAMES)
-            print(f"最終幀位置: 目標={frame_number}, 實際={int(actual_final)}")
-            ret, frame = temp_cap.read()
-            temp_cap.release()
-            if not ret:
-                print(f"❌ 最終錯誤: 無法讀取幀 {frame_number}")
-                return None
-            else:
-                print(f"✅ 最終成功讀取幀 {frame_number}")
-        
-        if self.rotation_angle != 0:
-            print(f"🔄 應用旋轉校正: {self.rotation_angle}°")
-            frame = rotate_frame(frame, self.rotation_angle)
-        
-        print(f"✅ 幀提取完成 - 幀號: {frame_number}, 尺寸: {frame.shape}")
-        print(f"📊 驗證: 計算時戳 = {frame_number / self.fps:.6f}s")
-        print("===================\n")
-        return frame
-
-    def get_frame_at_timestamp(self, timestamp: float) -> Optional[np.ndarray]:
-        """獲取指定時戳的影片幀 (舊版，可能有偏差)"""
-        frame_number = int(timestamp * self.fps)
-        print(f"\n=== 時戳估算提取 ===")
-        print(f"⚠️ 警告: 使用時戳估算，精度可能不如直接幀號")
-        print(f"輸入時戳: {timestamp:.6f}s")
-        print(f"影片FPS: {self.fps:.3f}")
-        print(f"估算幀號: {frame_number}")
-        print(f"估算誤差: ±{0.5/self.fps:.6f}s")
-        print("=====================")
-        return self.get_frame_at_index(frame_number)
+            print(f"   旋轉角度: {self.rotation_angle}°")
 
     def load_jpg_frame(self, jpg_filename: str) -> Optional[np.ndarray]:
-        """載入匯出的JPG檔案作為參考幀"""
-        video_name = os.path.splitext(self.video_name)[0]
-        jpg_path = os.path.join('lifts', 'exported_frames', video_name, jpg_filename)
+        """
+        載入匯出的JPG檔案作為參考幀
+        
+        Args:
+            jpg_filename: JPG檔案名稱（如 'pre_cluster_001.jpg'）
+            
+        Returns:
+            載入的影像幀，或None如果失敗
+        """
+        jpg_path = os.path.join('lifts', 'exported_frames', self.video_base_name, jpg_filename)
 
         if not os.path.exists(jpg_path):
             print(f"❌ JPG檔案不存在: {jpg_path}")
@@ -514,22 +434,13 @@ class VideoHandler:
         print(f"✅ 成功載入JPG: {jpg_filename}")
         return frame
 
-    def __del__(self):
-        """清理資源"""
-        if hasattr(self, 'cap') and self.cap.isOpened():
-            self.cap.release()
-
 class CorrectionApp:
     """半自動校正GUI應用程式"""
     
-    def __init__(self, root: tk.Tk, data_manager: DataManager, video_handler: VideoHandler,
-                 map_frames_enabled: bool = False, map_intercept: float = 318.0, map_slope: float = 0.9946):
+    def __init__(self, root: tk.Tk, data_manager: DataManager, jpg_handler: JPGHandler):
         self.root = root
         self.data_manager = data_manager
-        self.video_handler = video_handler
-        self.map_frames_enabled = map_frames_enabled
-        self.map_intercept = map_intercept
-        self.map_slope = map_slope
+        self.jpg_handler = jpg_handler
         
         # 校正狀態
         self.current_cluster_index = 0
@@ -644,10 +555,6 @@ class CorrectionApp:
         print(f"幀號數組: {frame_indices_int}")
         print(f"選中時戳: {timestamp:.6f}s (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
         print(f"選中幀號: {frame_id} (索引: {'0' if self.current_phase in ['roi_selection', 'line_marking_1'] else '-1'})")
-        mapped_frame_id = None
-        if self.map_frames_enabled and frame_id is not None and self.data_manager.use_frame_indices:
-            mapped_frame_id = map_frame_index(frame_id, self.map_intercept, self.map_slope)
-            print(f"➡️  映射後幀號: {mapped_frame_id}  (公式: {self.map_intercept} + {self.map_slope} × {frame_id})")
         print(f"時戳差異: {cluster.timestamps[-1] - cluster.timestamps[0]:.6f}s")
         if cluster.frame_indices and len(cluster.frame_indices) > 1:
             print(f"幀號差異: {int(cluster.frame_indices[-1]) - int(cluster.frame_indices[0])} 幀")
@@ -660,9 +567,12 @@ class CorrectionApp:
             print(f"💡 提示: 在標記時請注意這個預期的像素移動量")
         print("=========================")
         
+        # 初始化變數
+        used_jpg = False
+        
         # 更新資訊（包含幀號和物理群集資訊）
         total_clusters = self.data_manager.get_total_clusters()
-        cluster_info = f"檔案: {self.video_handler.video_name} | "
+        cluster_info = f"檔案: {self.jpg_handler.video_name} | "
 
         # 如果使用物理群集系統，顯示物理群集資訊
         if self.data_manager.has_frame_path and hasattr(cluster, 'physical_cluster'):
@@ -676,69 +586,49 @@ class CorrectionApp:
             cluster_info += f"群集: {self.current_cluster_index + 1}/{total_clusters} | "
             cluster_info += f"時戳: {timestamp:.3f}s"
             if frame_id is not None:
-                if mapped_frame_id is not None:
-                    cluster_info += f" | 幀號: {frame_id} → {mapped_frame_id}"
-                else:
-                    cluster_info += f" | 幀號: {frame_id}"
+                cluster_info += f" | 幀號: {frame_id}"
             cluster_info += f" | {description}"
         
         self.info_label.config(text=cluster_info)
         
-        # 更新視窗標題（包含當前群集和幀號信息）
-        window_title = f"半自動位移校正工具 - {self.video_handler.video_name}"
+        # 更新視窗標題（包含當前群集和時戳信息）
+        window_title = f"半自動位移校正工具 - {self.jpg_handler.video_name}"
         window_title += f" | 群集 {self.current_cluster_index + 1}/{total_clusters}"
         if frame_id is not None:
-            if mapped_frame_id is not None:
-                window_title += f" | 幀號: {frame_id}→{mapped_frame_id}"
-            else:
-                window_title += f" | 幀號: {frame_id}"
+            window_title += f" | 幀號: {frame_id}"
         window_title += f" | 時戳: {timestamp:.3f}s"
         self.root.title(window_title)
         
-        # 優先使用JPG檔案（物理群集系統）
+        # 加載JPG檔案（物理群集系統必需）
         frame = None
-        used_jpg = False
 
-        if self.data_manager.has_frame_path and hasattr(cluster, 'physical_cluster'):
-            physical_cluster = cluster.physical_cluster
-
-            if self.current_phase in ["roi_selection", "line_marking_1"]:
-                # 第一條線段：前0點
-                jpg_filename = physical_cluster.pre_zero_jpg
-                frame = self.video_handler.load_jpg_frame(jpg_filename)
-                if frame is not None:
-                    used_jpg = True
-                    print(f"✅ 使用前0點JPG: {jpg_filename}")
-                    description = f"物理群集 {physical_cluster.cluster_id} 前0點 (運動前狀態)"
-
-            elif self.current_phase == "line_marking_2":
-                # 第二條線段：後0點
-                jpg_filename = physical_cluster.post_zero_jpg
-                frame = self.video_handler.load_jpg_frame(jpg_filename)
-                if frame is not None:
-                    used_jpg = True
-                    print(f"✅ 使用後0點JPG: {jpg_filename}")
-                    description = f"物理群集 {physical_cluster.cluster_id} 後0點 (運動後狀態)"
-
-        # 回退到影片幀載入（如果JPG不可用）
-        if frame is None:
-            if frame_id is not None and self.data_manager.use_frame_indices:
-                target_frame_id = mapped_frame_id if mapped_frame_id is not None else frame_id
-                frame = self.video_handler.get_frame_at_index(target_frame_id)
-                print(f"🔄 回退使用影片幀號 {frame_id} 進行定位")
-            else:
-                frame = self.video_handler.get_frame_at_timestamp(timestamp)
-                print(f"🔄 回退使用時戳 {timestamp:.3f}s 進行估算定位")
-            
-        if frame is None:
-            error_msg = f"無法獲取"
-            if frame_id is not None:
-                error_msg += f"幀號 {frame_id} (時戳 {timestamp:.3f}s)"
-            else:
-                error_msg += f"時戳 {timestamp:.3f}s"
-            error_msg += " 的影片幀"
-            messagebox.showerror("錯誤", error_msg)
+        if not self.data_manager.has_frame_path or not hasattr(cluster, 'physical_cluster'):
+            messagebox.showerror("錯誤", "CSV 檔案缺少 'frame_path' 欄位或物理群集資訊\n此工具僅支援包含物理群集標籤的新版CSV格式")
             return
+
+        physical_cluster = cluster.physical_cluster
+
+        if self.current_phase in ["roi_selection", "line_marking_1"]:
+            # 第一條線段：前0點
+            jpg_filename = physical_cluster.pre_zero_jpg
+            frame = self.jpg_handler.load_jpg_frame(jpg_filename)
+            if frame is None:
+                messagebox.showerror("錯誤", f"無法加載前0點JPG檔案: {jpg_filename}\n請確保所有物理群集JPG檔案都已匯出到 lifts/exported_frames/{self.jpg_handler.video_base_name}/ 目錄")
+                return
+            used_jpg = True
+            print(f"✅ 使用前0點JPG: {jpg_filename}")
+            description = f"物理群集 {physical_cluster.cluster_id} 前0點 (運動前狀態)"
+
+        elif self.current_phase == "line_marking_2":
+            # 第二條線段：後0點
+            jpg_filename = physical_cluster.post_zero_jpg
+            frame = self.jpg_handler.load_jpg_frame(jpg_filename)
+            if frame is None:
+                messagebox.showerror("錯誤", f"無法加載後0點JPG檔案: {jpg_filename}\n請確保所有物理群集JPG檔案都已匯出到 lifts/exported_frames/{self.jpg_handler.video_base_name}/ 目錄")
+                return
+            used_jpg = True
+            print(f"✅ 使用後0點JPG: {jpg_filename}")
+            description = f"物理群集 {physical_cluster.cluster_id} 後0點 (運動後狀態)"
         
         self.show_frame(frame)
         
@@ -977,25 +867,24 @@ class CorrectionApp:
             return  # 點擊在圖像外
         
         # 轉換為放大後ROI中的座標
-        roi_local_x = int((canvas_x - img_x) / self.display_scale)
-        roi_local_y = int((canvas_y - img_y) / self.display_scale)
+        roi_local_x = (canvas_x - img_x) / self.display_scale
+        roi_local_y = (canvas_y - img_y) / self.display_scale
         
         # 轉換回原始影像座標
         roi_x, roi_y, roi_w, roi_h = self.roi_rect
-        original_x = roi_x + (roi_local_x // self.zoom_factor)
-        original_y = roi_y + (roi_local_y // self.zoom_factor)
+        original_x = roi_x + (roi_local_x / self.zoom_factor)
+        original_y = roi_y + (roi_local_y / self.zoom_factor)
         
         print(f"[DEBUG] 線段點座標轉換:")
         print(f"  畫布點擊: ({canvas_x}, {canvas_y})")
         print(f"  圖像邊界: {self.image_bounds}")
         print(f"  ROI本地: ({roi_local_x}, {roi_local_y})")
         print(f"  縮放因子: {self.zoom_factor}, 顯示縮放: {self.display_scale}")
-        print(f"  縮放調整: ({roi_local_x // self.zoom_factor}, {roi_local_y // self.zoom_factor})")
+        print(f"  縮放調整: ({roi_local_x / self.zoom_factor}, {roi_local_y / self.zoom_factor})")
         print(f"  ROI範圍: ({roi_x}, {roi_y}, {roi_w}, {roi_h})")
         print(f"  最終座標: ({original_x}, {original_y})")
         
         # 儲存點座標
-        roi_coords = (roi_local_x // self.zoom_factor, roi_local_y // self.zoom_factor)
         pixel_coords = (original_x, original_y)
         
         if self.current_point_in_line == 0:
@@ -1037,13 +926,18 @@ class CorrectionApp:
                 timestamp = cluster.timestamps[-1]
                 csv_index = cluster.csv_indices[-1]
 
+            start_pixel = self.current_line_points[0]
+            end_pixel = self.current_line_points[1]
+            start_roi = (start_pixel[0] - roi_x, start_pixel[1] - roi_y)
+            end_roi = (end_pixel[0] - roi_x, end_pixel[1] - roi_y)
+
             line = ReferenceLine(
                 timestamp=timestamp,
-                start_pixel_coords=self.current_line_points[0],
-                end_pixel_coords=self.current_line_points[1],
+                start_pixel_coords=start_pixel,
+                end_pixel_coords=end_pixel,
                 csv_index=csv_index,
-                start_roi_coords=(0, 0),  # 簡化：這裡主要記錄像素座標
-                end_roi_coords=roi_coords
+                start_roi_coords=start_roi,
+                end_roi_coords=end_roi
             )
 
             # 將標註添加到記錄中（支援多次標註）
@@ -1240,10 +1134,12 @@ class CorrectionApp:
                 print("===============================\n")
 
             # 兩條線段都已標記，計算並應用校正
-            self.apply_cluster_correction()
+            should_move_to_next = self.apply_cluster_correction()
             
-            # 移動到下一個群集
-            self.move_to_next_cluster()
+            # 只有當校正已完成時才移動到下一個群集
+            # 如果用戶選擇重新標註，會返回 False，不進入下一個群集
+            if should_move_to_next:
+                self.move_to_next_cluster()
     
     def previous_step(self):
         """返回上一步"""
@@ -1341,20 +1237,31 @@ class CorrectionApp:
         
         self.show_current_cluster()
 
-    def apply_cluster_correction(self):
-        """應用當前群集的校正"""
+    def apply_cluster_correction(self) -> bool:
+        """
+        應用當前群集的校正
+        
+        Returns:
+            bool: 如果校正已應用或用戶選擇使用人工值返回True，如果用戶選擇重新標注返回False
+        """
         if len(self.reference_lines) < 2:
             messagebox.showerror("錯誤", "需要兩條參考線段才能計算位移")
-            return
+            return False
         
         # 計算實際位移 (基於線段Y分量差異)
         line1 = self.reference_lines[0]  # 前零點線段
         line2 = self.reference_lines[1]  # 結束點線段
         
+        cluster = self.data_manager.get_cluster(self.current_cluster_index)
         measured_displacement = self.data_manager.calculate_displacement_from_lines(line1, line2)
+        original_displacement = sum(abs(v) for v in cluster.original_values)
+        measured_magnitude = abs(measured_displacement)
+        pixel_threshold = 3.0  # 像素
+        mm_threshold = (pixel_threshold * 10.0) / self.data_manager.scale_factor
+        difference_mm = measured_magnitude - original_displacement
+        difference_px = abs(difference_mm) * self.data_manager.scale_factor / 10.0
 
         # 顯示線段詳細資訊（包含幀號）
-        cluster = self.data_manager.get_cluster(self.current_cluster_index)
         print(f"\n=== 線段校正計算 ===")
         print(f"群集範圍: 第 {cluster.start_index + 1} 行到第 {cluster.end_index + 1} 行")
         if cluster.frame_indices:
@@ -1372,14 +1279,22 @@ class CorrectionApp:
         print(f"  Y分量差異: {line2.y_component:.1f} - {line1.y_component:.1f} = {line2.y_component - line1.y_component:.1f} 像素")
         print(f"  比例尺: {self.data_manager.scale_factor} 像素/10mm")
         print(f"  計算位移: ({line2.y_component - line1.y_component:.1f} × 10) / {self.data_manager.scale_factor} = {measured_displacement:.3f} mm")
+        print(f"程式估計值總和: {original_displacement:.3f} mm")
+        print(f"人工標記絕對值: {measured_magnitude:.3f} mm")
+        print(f"位移差異: {difference_mm:+.3f} mm (≈ {difference_px:.2f} 像素)")
+        print(f"容許差異閾值: {mm_threshold:.3f} mm (≈ {pixel_threshold:.1f} 像素)")
         print("=====================")
 
-        # 計算程式原始估計值
-        original_displacement = sum(abs(v) for v in cluster.original_values)
-
-        # 位移比較警示
-        if abs(measured_displacement) < original_displacement * 0.95:  # 人工測量值小於程式估計值的95%
-            choice = self.show_displacement_warning(measured_displacement, original_displacement)
+        if abs(difference_mm) >= mm_threshold:
+            choice = self.show_displacement_warning(
+                measured_displacement=measured_displacement,
+                measured_magnitude=measured_magnitude,
+                original_displacement=original_displacement,
+                difference_mm=difference_mm,
+                difference_px=difference_px,
+                mm_threshold=mm_threshold,
+                pixel_threshold=pixel_threshold
+            )
 
             if choice == "use_original":
                 # 使用程式估計值
@@ -1387,9 +1302,9 @@ class CorrectionApp:
                 print(f"用戶選擇使用程式估計值: {measured_displacement:.3f}mm")
             elif choice == "re_annotate":
                 # 重新標註 - 退回到第一條線段並清空所有標註
-                print("用戶選擇重新標註，退回到第一條線段")
+                print("用戶選擇重新標註，返回該群集的 ROI 圈選階段")
                 self.reset_to_first_line_annotation()
-                return  # 不應用校正，已重置到第一條線段階段
+                return False  # 返回 False 表示不應進入下一個群集
             # else: choice == "use_manual" - 使用人工測量值，繼續執行
 
         # 應用校正
@@ -1399,6 +1314,8 @@ class CorrectionApp:
             print(f"群集 {self.current_cluster_index + 1} 校正完成，測量位移: {measured_displacement:.3f}mm")
         else:
             print(f"群集 {self.current_cluster_index + 1} 被視為雜訊並移除")
+        
+        return True  # 返回 True 表示校正已完成，可以進入下一個群集
     
     def save_corrections(self):
         """儲存校正結果或暫存工作狀態"""
@@ -1578,17 +1495,24 @@ class CorrectionApp:
 
         return ReferenceLine(
             timestamp=first_annotation.timestamp,
-            start_pixel_coords=(int(avg_start_x), int(avg_start_y)),
-            end_pixel_coords=(int(avg_end_x), int(avg_end_y)),
+            start_pixel_coords=(avg_start_x, avg_start_y),
+            end_pixel_coords=(avg_end_x, avg_end_y),
             csv_index=first_annotation.csv_index,
             start_roi_coords=first_annotation.start_roi_coords,
             end_roi_coords=first_annotation.end_roi_coords
         )
 
-    def show_displacement_warning(self, measured_displacement: float, original_displacement: float) -> str:
+    def show_displacement_warning(
+        self,
+        measured_displacement: float,
+        measured_magnitude: float,
+        original_displacement: float,
+        difference_mm: float,
+        difference_px: float,
+        mm_threshold: float,
+        pixel_threshold: float
+    ) -> str:
         """顯示位移比較警示對話框"""
-        from tkinter import simpledialog
-
         # 創建自定義對話框
         dialog = tk.Toplevel(self.root)
         dialog.title("位移比較警示")
@@ -1609,11 +1533,14 @@ class CorrectionApp:
         title_label = ttk.Label(warning_frame, text="⚠️ 位移測量警示", font=("Arial", 14, "bold"))
         title_label.pack(pady=(0, 10))
 
-        info_text = f"""人工測量值明顯小於程式估計值：
+        direction = "較大" if difference_mm >= 0 else "較小"
+        info_text = f"""人工標記結果與程式估計值的差異超過容許範圍：
 
-• 人工測量值： {abs(measured_displacement):.3f} mm
+• 人工標記值（含方向）： {measured_displacement:.3f} mm
+• 人工標記絕對值： {measured_magnitude:.3f} mm
 • 程式估計值： {original_displacement:.3f} mm
-• 差異比例： {(abs(measured_displacement) / original_displacement * 100):.1f}%
+• 差異： {direction} {abs(difference_mm):.3f} mm (≈ {difference_px:.2f} 像素)
+• 容許差異閾值： {mm_threshold:.3f} mm (≈ {pixel_threshold:.1f} 像素)
 
 這可能表示：
 1. 標註精度可能不足
@@ -1654,13 +1581,14 @@ class CorrectionApp:
         return result["choice"] or "use_manual"  # 預設使用人工值
 
     def reset_to_first_line_annotation(self):
-        """重置到第一條線段標註階段，清空所有標註記錄"""
-        print(f"📝 重置標註狀態：清空所有線段標註記錄")
+        """重置回 ROI 圈選階段，清空所有標註記錄"""
+        print(f"📝 重置標註狀態：返回 ROI 圈選階段")
 
-        # 重置階段到第一條線段
-        self.current_phase = "line_marking_1"
+        # 重置階段回到 ROI 圈選（讓用戶重新圈選 ROI）
+        self.current_phase = "roi_selection"
         self.current_line_index = 0
         self.current_point_in_line = 0
+        self.roi_rect = None  # 清除已有的 ROI
 
         # 清空所有線段標註記錄
         line1_count = len(self.line_annotations[0])
@@ -1671,20 +1599,18 @@ class CorrectionApp:
 
         print(f"  - 已清空第一條線段 {line1_count} 次標註")
         print(f"  - 已清空第二條線段 {line2_count} 次標註")
-        print(f"  - 重置到第一條線段標記階段")
+        print(f"  - 重置到 ROI 圈選階段")
 
         # 清除畫布上的標記
         self.canvas.delete("line_marker")
         self.canvas.delete("existing_line")
 
-        # 重新顯示第一條線段（前0點）
+        # 重新顯示該群集（根據 current_phase = "roi_selection"，會顯示原始影像供圈選 ROI）
         self.show_current_cluster()
 
-        # 進入精細標記模式
-        self.enter_precision_marking_mode()
         self.update_status_message()
 
-        print(f"✅ 重置完成，請重新標註第一條線段")
+        print(f"✅ 重置完成，請重新圈選 ROI 區域")
 
     def save_temporary_state(self) -> str:
         """儲存暫時工作狀態到JSON檔案"""
@@ -1706,7 +1632,7 @@ class CorrectionApp:
             "metadata": {
                 "csv_file": csv_path.name,
                 "csv_path": str(csv_path),
-                "video_file": self.video_handler.video_name,
+                "video_file": self.jpg_handler.video_name,
                 "save_timestamp": datetime.now().isoformat(),
                 "format_version": "1.0"
             },
@@ -1718,9 +1644,6 @@ class CorrectionApp:
                 "current_point_in_line": self.current_point_in_line
             },
             "settings": {
-                "map_frames_enabled": self.map_frames_enabled,
-                "map_intercept": self.map_intercept,
-                "map_slope": self.map_slope,
                 "zoom_factor": self.zoom_factor,
                 "max_annotations": self.max_annotations
             },
@@ -1825,9 +1748,6 @@ class CorrectionApp:
 
             # 恢復設定
             settings = temp_data["settings"]
-            self.map_frames_enabled = settings.get("map_frames_enabled", self.map_frames_enabled)
-            self.map_intercept = settings.get("map_intercept", self.map_intercept)
-            self.map_slope = settings.get("map_slope", self.map_slope)
             self.zoom_factor = settings.get("zoom_factor", 8)
             self.max_annotations = settings.get("max_annotations", 3)
 
@@ -2046,12 +1966,6 @@ def select_temp_file(root: tk.Tk, temp_files: list) -> dict:
 
 def main():
     """主函數 - 選擇檔案並啟動校正工具"""
-    # 參數：可選啟用幀映射（仿射）
-    parser = argparse.ArgumentParser(description="半自動位移校正工具")
-    parser.add_argument("--map-frames", action="store_true", help="啟用 CSV 幀→原檔幀的仿射映射")
-    parser.add_argument("--map-intercept", type=float, default=318.0, help="幀映射截距，預設 318")
-    parser.add_argument("--map-slope", type=float, default=0.9946, help="幀映射斜率，預設 0.9946")
-    args, _ = parser.parse_known_args()
 
     # 建立根視窗但隱藏
     root = tk.Tk()
@@ -2074,7 +1988,7 @@ def main():
         if temp_files:
             temp_data = select_temp_file(root, temp_files)
 
-        # 從CSV檔名推導影片檔名
+        # 從CSV檔名推導影片檔名（僅用於查找JPG目錄）
         csv_filename = Path(csv_path).name
         # 支援帶前綴或不帶前綴的CSV檔案
         if csv_filename.startswith('c'):
@@ -2087,15 +2001,9 @@ def main():
             # 不帶前綴的CSV檔案，直接使用檔名
             video_filename = csv_filename.replace('.csv', '.mp4')
         
-        # 檢查對應的影片檔案
-        video_path = Path("lifts/data") / video_filename
-        if not video_path.exists():
-            messagebox.showerror("錯誤", f"找不到對應的影片檔案: {video_path}")
-            return
-        
         print(f"準備處理:")
         print(f"CSV檔案: {csv_path}")
-        print(f"影片檔案: {video_path}")
+        print(f"預期JPG目錄: lifts/exported_frames/{Path(video_filename).stem}/")
         
         # 初始化數據管理器
         data_manager = DataManager(csv_path, video_filename)
@@ -2106,17 +2014,14 @@ def main():
         
         print(f"發現 {data_manager.get_total_clusters()} 個需要校正的位移群集")
         
-        # 初始化影片處理器
-        video_handler = VideoHandler(str(video_path))
+        # 初始化JPG處理器
+        jpg_handler = JPGHandler(video_filename)
         
         # 啟動校正界面
         app = CorrectionApp(
             root,
             data_manager,
-            video_handler,
-            map_frames_enabled=args.map_frames,
-            map_intercept=args.map_intercept,
-            map_slope=args.map_slope,
+            jpg_handler,
         )
 
         # 如果有暫存資料，載入狀態
