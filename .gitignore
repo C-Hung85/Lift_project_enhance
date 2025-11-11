@@ -17,3 +17,7 @@ data/*
 *.tar
 *.mp4
 *.jpg
+
+#backup files
+*.bak
+

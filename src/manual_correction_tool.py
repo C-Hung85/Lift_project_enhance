@@ -53,6 +53,7 @@ class PhysicalCluster:
     region_values: List[float]         # 區間內的所有位移值
     is_pure_noise: bool                # 是否為純雜訊群集（區間內全為0）
     has_real_motion: bool              # 是否包含真實運動
+    orientation: int                   # 群集方向（1=上, -1=下, 0=未知）
 
 @dataclass
 class ReferenceLine:
@@ -174,6 +175,28 @@ class DataManager:
                     is_pure_noise = len(non_zero_values) == 0
                     has_real_motion = not is_pure_noise
 
+                    # 取得方向資訊（優先使用非零位移對應的 orientation）
+                    orientation = 0
+                    if 'orientation' in self.df.columns:
+                        orientation_series = self.df.iloc[pre_zero_index:post_zero_index+1]['orientation'].tolist()
+
+                        # 與非零位移對應的方向
+                        paired_orientations = [
+                            int(ori) for ori, val in zip(orientation_series, region_values)
+                            if val != 0 and isinstance(ori, (int, float)) and ori != 0
+                        ]
+
+                        if paired_orientations:
+                            orientation = paired_orientations[0]
+                        else:
+                            # 回退：任何非零 orientation
+                            orientation_candidates = [
+                                int(ori) for ori in orientation_series
+                                if isinstance(ori, (int, float)) and ori != 0
+                            ]
+                            if orientation_candidates:
+                                orientation = orientation_candidates[0]
+
                     cluster = PhysicalCluster(
                         cluster_id=cluster_id,
                         pre_zero_index=pre_zero_index,
@@ -182,7 +205,8 @@ class DataManager:
                         post_zero_jpg=post_tag,
                         region_values=region_values,
                         is_pure_noise=is_pure_noise,
-                        has_real_motion=has_real_motion
+                        has_real_motion=has_real_motion,
+                        orientation=int(orientation)
                     )
 
                     # 只加入有真實運動的群集到校正清單
@@ -242,6 +266,7 @@ class DataManager:
             setattr(cluster, 'physical_cluster', phys_cluster)
             setattr(cluster, 'has_pre_zero', True)
             setattr(cluster, 'post_zero_index', phys_cluster.post_zero_index)
+            setattr(cluster, 'orientation', getattr(phys_cluster, 'orientation', 0))
 
             correction_clusters.append(cluster)
 
@@ -348,13 +373,12 @@ class DataManager:
         if total_original == 0:
             return False
 
+        displacement_sign = -1 if measured_displacement < 0 else 1
+        measured_magnitude = abs(measured_displacement)
+
         for idx, original_val in zip(non_zero_indices, non_zero_values):
             ratio = abs(original_val) / total_original
-            corrected_val = measured_displacement * ratio
-
-            # 保持原始正負號
-            if original_val < 0:
-                corrected_val = -corrected_val
+            corrected_val = measured_magnitude * ratio * displacement_sign
 
             self.df.iloc[idx, self.displacement_col_index] = corrected_val
 
@@ -1254,6 +1278,11 @@ class CorrectionApp:
         
         cluster = self.data_manager.get_cluster(self.current_cluster_index)
         measured_displacement = self.data_manager.calculate_displacement_from_lines(line1, line2)
+
+        # 根據群集方向調整位移符號（確保保留正負號）
+        orientation_sign = getattr(cluster, 'orientation', None)
+        if orientation_sign in (-1, 1):
+            measured_displacement = abs(measured_displacement) * orientation_sign
         original_displacement = sum(abs(v) for v in cluster.original_values)
         measured_magnitude = abs(measured_displacement)
         pixel_threshold = 3.0  # 像素
@@ -1279,6 +1308,8 @@ class CorrectionApp:
         print(f"  Y分量差異: {line2.y_component:.1f} - {line1.y_component:.1f} = {line2.y_component - line1.y_component:.1f} 像素")
         print(f"  比例尺: {self.data_manager.scale_factor} 像素/10mm")
         print(f"  計算位移: ({line2.y_component - line1.y_component:.1f} × 10) / {self.data_manager.scale_factor} = {measured_displacement:.3f} mm")
+        if orientation_sign in (-1, 1):
+            print(f"  群集方向 orientation: {orientation_sign}（{'上' if orientation_sign > 0 else '下'}）")
         print(f"程式估計值總和: {original_displacement:.3f} mm")
         print(f"人工標記絕對值: {measured_magnitude:.3f} mm")
         print(f"位移差異: {difference_mm:+.3f} mm (≈ {difference_px:.2f} 像素)")
