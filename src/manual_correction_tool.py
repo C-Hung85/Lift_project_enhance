@@ -425,6 +425,7 @@ class JPGHandler:
         self.video_name = video_name
         self.video_base_name = os.path.splitext(video_name)[0]
         self.rotation_angle = rotation_config.get(video_name, 0)
+        self._should_apply_rotation: Optional[bool] = None
         
         print(f"✅ JPG處理器初始化成功: {self.video_name}")
         if self.rotation_angle != 0:
@@ -451,12 +452,57 @@ class JPGHandler:
             print(f"❌ 無法載入JPG檔案: {jpg_path}")
             return None
 
-        # 應用旋轉（如果有設定）
+        # 檢測是否需要套用旋轉（僅判斷一次後快取結果）
         if self.rotation_angle != 0:
-            frame = rotate_frame(frame, self.rotation_angle)
+            if self._should_apply_rotation is None:
+                if self._is_frame_probably_rotated(frame):
+                    print("ℹ️ 偵測到JPG影像角落存在大面積黑邊，推測已在匯出階段完成旋轉，略過再次旋轉。")
+                    self._should_apply_rotation = False
+                else:
+                    print(f"🔄 匯出影像未發現黑邊，將套用設定的旋轉角度 {self.rotation_angle}°。")
+                    self._should_apply_rotation = True
+
+            if self._should_apply_rotation:
+                frame = rotate_frame(frame, self.rotation_angle)
 
         print(f"✅ 成功載入JPG: {jpg_filename}")
         return frame
+
+    @staticmethod
+    def _is_frame_probably_rotated(frame: np.ndarray) -> bool:
+        """估測影像是否已經套用旋轉（檢查角落黑邊比例）"""
+        if frame is None or frame.size == 0:
+            return False
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+
+        # 取 12% 的角落區域，但至少 40 像素
+        patch_h = max(int(h * 0.12), 40)
+        patch_w = max(int(w * 0.12), 40)
+
+        patches = [
+            gray[0:patch_h, 0:patch_w],                          # 左上
+            gray[0:patch_h, w - patch_w:w],                      # 右上
+            gray[h - patch_h:h, 0:patch_w],                      # 左下
+            gray[h - patch_h:h, w - patch_w:w],                  # 右下
+        ]
+
+        dark_level = 18
+        ratio_threshold = 0.45
+        mean_threshold = 35
+
+        black_corner_count = 0
+        for patch in patches:
+            if patch.size == 0:
+                continue
+            black_ratio = float(np.mean(patch <= dark_level))
+            mean_intensity = float(np.mean(patch))
+            if black_ratio >= ratio_threshold and mean_intensity <= mean_threshold:
+                black_corner_count += 1
+
+        # 正常旋轉後會有至少兩個角落出現黑邊
+        return black_corner_count >= 2
 
 class CorrectionApp:
     """半自動校正GUI應用程式"""

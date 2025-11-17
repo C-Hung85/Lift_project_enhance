@@ -78,7 +78,8 @@
 - **平均計算**: 基於剔除離群值後的3次標註平均線段
 - **Y分量計算**: `displacement = line2.y_component - line1.y_component`
 - **比例換算**: `displacement_mm = (pixel_diff × 10.0) / scale_factor`
-- **比較警示**: 人工值 < 程式估計值95% 時觸發警告對話框
+- **方向套用**: 自動依據群集的 `orientation` 欄位套用正負號
+- **比較警示**: 人工值與程式估計值的差異（換算成像素）≥ 3 像素時觸發警告，無論人工值較大或較小
 - **三種選擇**:
   1. **使用程式估計值**: 採用自動檢測結果
   2. **重新標註**: 完全重置到第一條線段，清空所有標註
@@ -186,12 +187,12 @@ def apply_physical_cluster_correction(physical_cluster, measured_displacement):
     non_zero_values = get_non_zero_values_in_cluster(physical_cluster)
     total_original = sum(abs(val) for val in non_zero_values)
 
+    displacement_sign = -1 if measured_displacement < 0 else 1
+    measured_magnitude = abs(measured_displacement)
+
     for idx, original_val in zip(non_zero_indices, non_zero_values):
         ratio = abs(original_val) / total_original
-        corrected_val = measured_displacement * ratio
-        # 保持原始正負號
-        if original_val < 0:
-            corrected_val = -corrected_val
+        corrected_val = measured_magnitude * ratio * displacement_sign
         df.iloc[idx, displacement_col_index] = corrected_val
 
     return True

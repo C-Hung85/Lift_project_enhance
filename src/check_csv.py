@@ -14,3 +14,4 @@ print(f"總非 NaN: {df['frame_path'].notna().sum()}")
 print("\n前30個 frame_path 值:")
 print(df['frame_path'].unique()[:30])
 
+
