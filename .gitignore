@@ -20,4 +20,5 @@ data/*
 
 #backup files
 *.bak
+*.zip
 

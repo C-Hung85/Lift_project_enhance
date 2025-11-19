@@ -15,3 +15,7 @@ print("\n前30個 frame_path 值:")
 print(df['frame_path'].unique()[:30])
 
 
+
+
+
+
