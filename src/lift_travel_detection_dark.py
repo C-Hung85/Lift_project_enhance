@@ -1,697 +1,349 @@
-import os
-import sys
-os.chdir(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-sys.path.append("src/")
-import cv2
-import warnings
-import datetime
-import pandas as pd
-import numpy as np
-from multiprocessing import Pool
-from config import Config, video_config
+"""
+新暗房標註系統的入口點（階段 A：環境準備與資源盤點）。
+
+此版本僅負責：
+1. 載入整體設定（路徑、時間窗口、旋轉配置等）
+2. 掃描可處理的影片清單並列出摘要
+3. 顯示比例尺快取 / 暗房區間 / CSV schema 等資訊
+
+後續階段會在這個骨架上逐步加入 SequentialFrameReader、
+OpenCVGUIPlayer、Cluster 工作流與 CSV 寫入等模組。
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import List, Sequence
+
+from config import (
+    DarkroomProjectConfig,
+    VideoTimeWindow,
+    load_darkroom_project_config,
+)
+from darkroom_csv_schema import SCHEMA
+from darkroom_utils import get_darkroom_intervals_for_video, print_darkroom_summary
+from darkroom_video_utils import (
+    VideoSource,
+    discover_video_sources,
+    group_sources_by_base,
+    get_base_video_name,
+)
+from scale_cache_utils import (
+    get_missing_videos,
+    load_scale_cache,
+    print_cache_status,
+)
+from sequential_frame_reader import SequentialFrameReader
+from opencv_gui_player import OpenCVGUIPlayer
+
 try:
     from rotation_config import rotation_config
 except ImportError:
-    # 如果 rotation_config.py 不存在，使用空字典
     rotation_config = {}
-from rotation_utils import rotate_frame
 
 try:
     from darkroom_intervals import darkroom_intervals
 except ImportError:
-    # 如果 darkroom_intervals.py 不存在，使用空字典
     darkroom_intervals = {}
-from darkroom_utils import get_darkroom_intervals_for_video, is_in_darkroom_interval
 
-def get_base_video_name(filename):
-    """
-    將 darkroom 檔名轉換為 base 檔名以查詢參數
 
-    Examples:
-        '21a.mp4' -> '21.mp4'
-        '21_a.mp4' -> '21.mp4'
-        '21.mp4' -> '21.mp4'
-    """
-    name, ext = os.path.splitext(filename)
-    # 移除 _a 或 a 後綴
-    if name.endswith('_a'):
-        name = name[:-2]
-    elif name.endswith('a'):
-        name = name[:-1]
-    return name + ext
-
-def preprocess_darkroom_frame(frame):
-    """
-    CLAHE 前處理（僅用於暗房區間）
-
-    Parameters:
-        frame: BGR or grayscale frame
-
-    Returns:
-        enhanced: Grayscale enhanced frame
-    """
-    if len(frame.shape) == 3:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = frame
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
-
-    return enhanced
-
-def export_frame_jpg(frame_data, jpg_filename, video_name):
-    """匯出單個幀為JPG（於 exported_frames/<video_name>_dark/ 下）"""
-    frame_idx, frame = frame_data
-
-    export_dir = os.path.join('lifts', 'exported_frames', f'{video_name}_dark')
-    os.makedirs(export_dir, exist_ok=True)
-
-    export_path = os.path.join(export_dir, jpg_filename)
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
-    success = cv2.imwrite(export_path, frame, encode_param)
-    if success:
-        print(f"📸 匯出JPG: {jpg_filename} (frame {frame_idx})")
-    else:
-        print(f"❌ 匯出失敗: {jpg_filename}")
-    return success
-
-from scale_cache_utils import (
-    load_scale_cache, 
-    save_scale_cache, 
-    is_cache_valid, 
-    get_missing_videos,
-    print_cache_status,
-    generate_scale_images_hash
-)
-
-warnings.filterwarnings('ignore')
-
-# Parameters and objects
-DATA_FOLDER = Config['files']['data_folder']
-feature_detector = cv2.ORB.create(nfeatures=100)
-feature_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)  # 改為與測試程式一致
-FRAME_INTERVAL = Config['scan_setting']['interval']
-ROI_RATIO = 0.6
-# 檢測參數（像素域）- 簡化為測試程式的參數
-EFFECT_MIN_PX = 1.5  # 對應測試程式的 MOTION_MIN_DISPLACEMENT
-PAIR_TOLERANCE_PX = 1.0
-JITTER_MAX_PX = 1.0
-EXIT_ZERO_LEN = 3
-REVERSAL_PERSIST_R = 2
-MIN_MATCHES = 8  # 對應測試程式的 MOTION_MIN_MATCHES
-LOWE_RATIO = 0.75  # Lowe's ratio test 閾值
-
-
-# create necessary folders
-for folder_name in ['inspection', 'result']:
-    os.makedirs(os.path.join(DATA_FOLDER, 'lifts', folder_name), exist_ok=True)
-
-def scan(video_path, file_name):
-    vidcap = cv2.VideoCapture(video_path)
-    ret, frame = vidcap.read()
-    h, w = frame.shape[:2]
-    video_length = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = vidcap.get(cv2.CAP_PROP_FPS)
-
-    # 取得 base name 用於查詢參數（例如 21a.mp4 -> 21.mp4）
-    base_name = get_base_video_name(file_name)
-
-    start_frame = int(video_config.get(base_name, {}).get('start', 0) * fps)
-    end_frame = int(video_config.get(base_name, {}).get('end', video_length/fps) * fps)
-    roi_ratio = video_config.get(base_name, {}).get('roi_ratio', ROI_RATIO)
-
-    # 取得暗房時間區間設定（使用 base_name）
-    darkroom_intervals_seconds, has_darkroom = get_darkroom_intervals_for_video(base_name, darkroom_intervals)
-
-    # create a mask to define the ROI
-    mask = np.zeros((h, w), dtype=np.uint8)
-    mask[int(h*roi_ratio/2):int(h*(1-roi_ratio/2)), int(w*roi_ratio/2):int(w*(1-roi_ratio/2))] = 1
-
-    # record container
-    result = {
-        'frame':[],
-        'frame_idx':[],
-        'keypoints':[], 
-        'camera_pan':[],
-        'v_travel_distance':[],
-        'kp_pair_lines':[],
-        'frame_path':[],
-        # 腳手架：之後將填入真正的群集資訊；此階段先固定為 0/空字串
-        'cluster_id':[],      # 群外為 0
-        'orientation':[],     # -1/0/+1；群外 0
-        'darkroom_event':[]   # 'enter_darkroom' / 'exit_darkroom' / ''
-    }
-
-    # 狀態機變數（群集與抖動處理，入群延遲一幀）
-    state = 'Idle'  # Idle / PendingEnter / InCluster
-    pending_idx = None
-    pending_delta_px = None
-    pending_result_idx = None
-    current_cluster_id = 0
-    physical_cluster_counter = 0
-    orientation_current = 0
-    zero_streak = 0
-    reversal_streak = 0
-    # 匯出/快取變數
-    frame_cache = []                    # 最近處理幀 (frame_idx, frame)
-    pending_pre_export = None           # (frame_data, jpg_filename)
-    last_darkroom_frame = None          # (frame_idx, frame) - 改為 last_darkroom_frame
-    video_name = os.path.splitext(file_name)[0]
-
-    # detect keypoints
-    keypoint_list1, feature_descrpitor1 = feature_detector.detectAndCompute(frame, mask)
-
-    # set video to the start point
-    vidcap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-    prev_is_darkroom = False
-
-    while ret:
-        frame_idx = int(vidcap.get(cv2.CAP_PROP_POS_FRAMES))
-        ret, frame = vidcap.read()
-
-        if frame_idx >= end_frame:
-            break
-
-        if ret and frame_idx % FRAME_INTERVAL == 0:
-            # 檢查是否需要旋轉影像（使用 base_name 查詢）
-            if base_name in rotation_config:
-                rotation_angle = rotation_config[base_name]
-                frame = rotate_frame(frame, rotation_angle)
-
-            # 判斷是否在暗房區間
-            is_darkroom = is_in_darkroom_interval(frame_idx / fps, darkroom_intervals_seconds)
-
-            # 準備用於偵測和視覺化的幀
-            if is_darkroom:
-                # CLAHE 前處理
-                frame_gray_enhanced = preprocess_darkroom_frame(frame)
-                # 轉換為 BGR 用於視覺化和 JPG 匯出
-                frame_enhanced_bgr = cv2.cvtColor(frame_gray_enhanced, cv2.COLOR_GRAY2BGR)
-                # 用於特徵偵測
-                frame_for_detection = frame_gray_enhanced
-            else:
-                # 非暗房區間使用原始幀
-                frame_enhanced_bgr = frame
-                frame_for_detection = frame
-
-            keypoint_list2, feature_descrpitor2 = feature_detector.detectAndCompute(frame_for_detection, mask)
-
-            # default values
-            vertical_travel_distance = 0
-            camera_pan = False
-            display_keypoints = []
-            kp_pair_lines = []
-
-            if feature_descrpitor1 is not None and feature_descrpitor2 is not None:
-                # 使用 knnMatch + Lowe's ratio test（與測試程式一致）
-                matches = feature_matcher.knnMatch(feature_descrpitor1, feature_descrpitor2, k=2)
-
-                # Lowe's ratio test
-                good_matches = []
-                for m_n in matches:
-                    if len(m_n) == 2:
-                        m, n = m_n
-                        if m.distance < LOWE_RATIO * n.distance:
-                            good_matches.append(m)
-
-                if len(good_matches) >= MIN_MATCHES:
-                    # 計算所有匹配的垂直位移
-                    vertical_displacements = []
-                    display_keypoints = []
-                    kp_pair_lines = []
-
-                    for m in good_matches:
-                        kp1 = keypoint_list1[m.queryIdx]
-                        kp2 = keypoint_list2[m.trainIdx]
-
-                        # 計算垂直位移 (OpenCV 座標：向下為正，向上為負)
-                        dy = kp2.pt[1] - kp1.pt[1]
-                        vertical_displacements.append(dy)
-
-                        display_keypoints.append(kp2)
-                        kp_pair_lines.append((
-                            np.array(kp1.pt, dtype=int),
-                            np.array(kp2.pt, dtype=int)
-                        ))
-
-                    # 計算中位數位移
-                    median_dy = np.median(vertical_displacements)
-
-                    # 符號反轉：向上移動 = 正值（使用者期望）
-                    # OpenCV: 向下為正 → 我們需要反轉
-                    vertical_travel_distance = int(-median_dy)
-
-                    # camera_pan 檢測（簡化版：檢查水平位移）
-                    horizontal_displacements = [kp2.pt[0] - kp1.pt[0]
-                                               for m in good_matches
-                                               for kp1, kp2 in [(keypoint_list1[m.queryIdx], keypoint_list2[m.trainIdx])]]
-                    median_dx = np.median(horizontal_displacements)
-                    camera_pan = abs(median_dx) > 5.0  # 水平移動超過 5 pixels 視為 pan
-
-            # ===== 暗房邏輯反轉：只處理暗房區間，非暗房填 0 =====
-            # is_darkroom 已在前面判定（line 187）
-
-            # 如果在非暗房區間內，將運動距離設為 0（忽略）
-            if not is_darkroom:
-                vertical_travel_distance = 0
-
-            # 暗房事件（僅記錄進出，不改變顯示文字行為）
-            if is_darkroom and not prev_is_darkroom:
-                darkroom_event = 'enter_darkroom'
-            elif (not is_darkroom) and prev_is_darkroom:
-                darkroom_event = 'exit_darkroom'
-            else:
-                darkroom_event = ''
-
-            # 狀態機計算（以像素域判斷候選）- 反轉：只處理暗房
-            delta_px = vertical_travel_distance
-            is_candidate = (not camera_pan) and (abs(delta_px) >= EFFECT_MIN_PX) and is_darkroom
-            effective_mm_current = 0.0
-
-            if not is_darkroom:
-                # 非暗房：強制回到 Idle 狀態，不累計群集（反轉邏輯）
-                if state == 'InCluster':
-                    # 在群內時離開暗房 → 強制出群，post 用離開前最後一個暗房幀（已經是 frame_enhanced_bgr）
-                    if last_darkroom_frame is not None and current_cluster_id:
-                        post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
-                        export_frame_jpg(last_darkroom_frame, post_name, video_name)
-                        # 將上一幀的 frame_path 標記為 post
-                        if 'frame_path' in result and len(result['frame_path']) > 0:
-                            result['frame_path'][-1] = post_name
-                    # 匯出 pre（若尚未匯出）
-                    if pending_pre_export is not None:
-                        export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
-                        pending_pre_export = None
-                state = 'Idle'
-                pending_idx = None
-                pending_delta_px = None
-                pending_result_idx = None
-                zero_streak = 0
-                reversal_streak = 0
-                orientation_current = 0
-                current_cluster_id = 0
-
-            elif state == 'Idle':
-                zero_streak = 0
-                reversal_streak = 0
-                if is_candidate:
-                    state = 'PendingEnter'
-                    pending_idx = frame_idx
-                    pending_delta_px = delta_px
-                    pending_result_idx = len(result['frame_idx'])  # 將在本迭代末尾寫入 0，之後再回填
-                # Idle 狀態輸出 0
-
-            elif state == 'PendingEnter':
-                if not is_candidate:
-                    # 下一幀不是候選 → 視為噪聲，取消 pending
-                    state = 'Idle'
-                    pending_idx = None
-                    pending_delta_px = None
-                    pending_result_idx = None
-                else:
-                    # 是候選：檢查符號關係
-                    if np.sign(delta_px) != np.sign(pending_delta_px):
-                        # 相反號：先檢查是否為可抵銷的正負對
-                        if abs(delta_px + pending_delta_px) <= PAIR_TOLERANCE_PX:
-                            # 典型正負對 → 抵銷後回 Idle
-                            state = 'Idle'
-                            pending_idx = None
-                            pending_delta_px = None
-                            pending_result_idx = None
-                        else:
-                            # 邊界相反但不成對 → 將當前候選改為新的 pending，等待下一幀再決定
-                            pending_idx = frame_idx
-                            pending_delta_px = delta_px
-                            pending_result_idx = len(result['frame_idx'])
-                            # 保持 PendingEnter 狀態
-                    else:
-                        # 同號候選 → 確認入群（以前一幀 pending 為起點）
-                        state = 'InCluster'
-                        physical_cluster_counter += 1
-                        current_cluster_id = physical_cluster_counter
-                        orientation_current = 1 if pending_delta_px > 0 else -1
-                        # 標記 pre：將 pending 那幀的 frame_path 設為 pre，並準備匯出快照
-                        pre_name = f'pre_cluster_{current_cluster_id:03d}.jpg'
-                        if pending_result_idx is not None and pending_result_idx < len(result['frame_path']):
-                            result['frame_path'][pending_result_idx] = pre_name
-                        # 從 frame_cache 取對應影格（優先 -2，其次 -1）
-                        pre_frame = frame_cache[-2] if len(frame_cache) >= 2 else (frame_idx, frame)
-                        pending_pre_export = (pre_frame, pre_name)
-                        # 回填 pending 幀的 mm、cluster 與方向
-                        if pending_result_idx is not None and pending_result_idx < len(result['v_travel_distance']):
-                            scale_factor = video_scale_dict.get(base_name, 1.0)
-                            result['v_travel_distance'][pending_result_idx] = pending_delta_px * 10 / scale_factor
-                            result['cluster_id'][pending_result_idx] = current_cluster_id
-                            result['orientation'][pending_result_idx] = orientation_current
-                        pending_idx = None
-                        pending_delta_px = None
-                        pending_result_idx = None
-
-            elif state == 'InCluster':
-                if is_candidate:
-                    if np.sign(delta_px) != orientation_current and abs(delta_px) <= JITTER_MAX_PX:
-                        # 小幅反向抖動：視為 0（不改狀態）
-                        pass
-                    elif np.sign(delta_px) != orientation_current:
-                        reversal_streak += 1
-                        if reversal_streak >= REVERSAL_PERSIST_R:
-                            # 真反轉：關閉當前群，下一幀再重新 Pending（簡化：回 Idle）
-                            state = 'Idle'
-                            current_cluster_id = 0
-                            orientation_current = 0
-                            reversal_streak = 0
-                            zero_streak = 0
-                        else:
-                            # 暫時視為 0
-                            pass
-                    else:
-                        # 同向：維持
-                        reversal_streak = 0
-                        zero_streak = 0
-                        effective_mm_current = delta_px * 10 / video_scale_dict.get(base_name, 1.0)
-                else:
-                    zero_streak += 1
-                    if zero_streak >= EXIT_ZERO_LEN:
-                        # 出群
-                        # 匯出 pre（若尚未匯出）與 post
-                        if current_cluster_id:
-                            post_name = f'post_cluster_{current_cluster_id:03d}.jpg'
-                            export_frame_jpg((frame_idx, frame_enhanced_bgr), post_name, video_name)
-                            if pending_pre_export is not None:
-                                export_frame_jpg(pending_pre_export[0], pending_pre_export[1], video_name)
-                                pending_pre_export = None
-                            # 記錄本幀 post 標記（設當前索引）
-                            current_index = len(result['frame_idx'])
-                            # 本幀稍後會被 append；因此先記個變數，稍後補寫
-                            post_mark_name = post_name
-                        else:
-                            post_mark_name = ''
-                        state = 'Idle'
-                        current_cluster_id = 0
-                        orientation_current = 0
-                        zero_streak = 0
-                        reversal_streak = 0
-                    else:
-                        # 仍在群內但本幀不是候選 → 輸出 0
-                        pass
-
-            # 維護幀快取（使用 frame_enhanced_bgr）
-            frame_cache.append((frame_idx, frame_enhanced_bgr.copy()))
-            if len(frame_cache) > 20:
-                frame_cache.pop(0)
-            # 反轉：快取暗房幀
-            if is_darkroom:
-                last_darkroom_frame = (frame_idx, frame_enhanced_bgr.copy())
-
-            # 寫入結果（使用 frame_enhanced_bgr）
-            result['frame'].append(frame_enhanced_bgr)
-            result['frame_idx'].append(frame_idx)
-            result['keypoints'].append(display_keypoints)
-            result['kp_pair_lines'].append(kp_pair_lines)
-            result['camera_pan'].append(camera_pan or is_darkroom)  # camera_pan 或暗房區間都顯示為 pan
-            # 檢查是否有有效的比例尺資料（使用 base_name）
-            if base_name in video_scale_dict:
-                scale_factor = video_scale_dict[base_name]
-            else:
-                print(f"⚠️  警告: 影片 {file_name} (base: {base_name}) 沒有有效的比例尺資料，使用預設值 1.0")
-                scale_factor = 1.0
-            # 依狀態輸出當前幀的有效位移
-            if state == 'InCluster' and effective_mm_current == 0.0 and is_candidate and np.sign(delta_px) == orientation_current:
-                effective_mm_current = delta_px * 10 / scale_factor
-            result['v_travel_distance'].append(effective_mm_current)
-            result['cluster_id'].append(current_cluster_id if state == 'InCluster' else 0)
-            result['orientation'].append(orientation_current if state == 'InCluster' else 0)
-            # 腳手架：先寫入空的群集資訊（之後實作狀態機再填實）
-            result['darkroom_event'].append(darkroom_event)
-            # 預設填空 frame_path
-            result['frame_path'].append('')
-            # 若剛剛決定 post（出群），把本幀標記為 post
-            if 'post_mark_name' in locals() and post_mark_name:
-                result['frame_path'][-1] = post_mark_name
-                del post_mark_name
-
-            keypoint_list1 = keypoint_list2
-            feature_descrpitor1 = feature_descrpitor2
-            prev_is_darkroom = is_darkroom
-    
-    # post-process the result
-    for idx in range(1, len(result['v_travel_distance'])-1):
-        if result['v_travel_distance'][idx] != 0 and (result['v_travel_distance'][idx-1]==0 and result['v_travel_distance'][idx+1]==0):
-            result['v_travel_distance'][idx] = 0
-
-    # original video reset to frame 1
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    # 修改輸出路徑：darkroom_data -> inspection，檔名加 _dark
-    inspection_path = video_path.replace("darkroom_data", "inspection").replace(".mp4", "_dark_inspection.mp4")
-    out = cv2.VideoWriter(inspection_path, fourcc, fps/FRAME_INTERVAL, (w, h))
-
-    travel_distance_sum = 0
-
-    for frame, frame_idx, keypoints, kp_pair_lines, camera_pan, vertical_travel_distance, cluster_id_disp, orientation_disp in zip(
-        result['frame'], result['frame_idx'], result['keypoints'], result['kp_pair_lines'], result['camera_pan'], result['v_travel_distance'], result['cluster_id'], result['orientation']):
-        travel_distance_sum += vertical_travel_distance
-
-        # 檢查當前幀是否在暗房區間內（用於顯示）
-        current_time_seconds = frame_idx / fps
-        is_darkroom, _ = is_in_darkroom_interval(current_time_seconds, darkroom_intervals_seconds)
-
-        # draw the display info
-        frame = cv2.drawKeypoints(frame, keypoints, None, color=(0, 255, 0), flags=0)
-        for coord1, coord2 in kp_pair_lines:
-            cv2.line(frame, coord1, coord2, [0, 0, 255], 2)
-        
-        # 決定顯示文字和顏色
-        if is_darkroom:
-            display_text = "darkroom (active)"
-            text_color = (128, 128, 128)  # 灰色
-        elif camera_pan and not is_darkroom:
-            display_text = "camera pan"
-            text_color = (0, 255, 255)  # 黃色
-        else:
-            display_text = f"travel: {round(travel_distance_sum, 5)} mm"
-            text_color = (0, 0, 255) if vertical_travel_distance == 0 else (0, 255, 0)  # 紅色/綠色
-        
-        # 顯示 Frame ID（第一行）
-        cv2.putText(
-            frame,
-            f"Frame: {frame_idx}",
-            (10, h-110),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (255, 255, 255),
-            2)
-
-        # 顯示時間與狀態（第二行）
-        cv2.putText(
-            frame, 
-            f"{round(frame_idx/fps, 1)} sec  {display_text}", 
-            (10, h-80), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            1, 
-            text_color, 
-            2)
-
-        # 顯示群集與方向（第三行，僅在群內）
-        if cluster_id_disp:
-            arrow = 'UP' if orientation_disp > 0 else ('DOWN' if orientation_disp < 0 else '')
-            cv2.putText(
-                frame,
-                f"cluster #{cluster_id_disp} {arrow}",
-                (10, h-50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (255, 255, 255),
-                2)
-        
-        out.write(frame)
-            
-    out.release()
-
-    # write down the record
-    # 正確生成 CSV 檔案路徑（加上 _dark 後綴）
-    video_filename = os.path.basename(video_path)  # 取得檔名 (例如: 21a.mp4)
-    csv_filename = os.path.splitext(video_filename)[0] + "_dark.csv"  # 移除副檔名並加上 _dark.csv (例如: 21a_dark.csv)
-    csv_path = os.path.join(DATA_FOLDER, 'lifts', 'result', csv_filename)
-    
-    print(f"💾 儲存 CSV 檔案: {csv_path}")
-    
-    pd.DataFrame({
-        'frame_idx':result['frame_idx'],
-        'second':[round(i/(fps), 3) for i in result['frame_idx']],
-        'vertical_travel_distance (mm)':result['v_travel_distance'],
-        'cluster_id':result['cluster_id'],
-        'orientation':result['orientation'],
-        'darkroom_event':result['darkroom_event'],
-        'frame_path':result.get('frame_path', ['']*len(result['frame_idx']))
-    }).to_csv(csv_path, index=False)
-
-    print(f"complete: {video_path}")
-
-
-# 比例尺處理 - 使用快取機制
-scale_images_dir = os.path.join(DATA_FOLDER, 'lifts', 'scale_images')
-
-print("📏 載入比例尺快取...")
-scale_cache, cache_info = load_scale_cache()
-
-# 檢查快取是否有效
-cache_valid = is_cache_valid(scale_images_dir, cache_info)
-
-# 取得所有影片檔案（從 darkroom_data 目錄）
-video_files = []
-for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts', 'darkroom_data')):
-    video_files.extend([f for f in files if f.endswith('.mp4')])
-
-# 確定需要計算比例尺的影片
-if cache_valid:
-    missing_videos = get_missing_videos(scale_cache, video_files)
-    print(f"📋 快取有效，發現 {len(missing_videos)} 個新影片需要計算比例尺")
-else:
-    missing_videos = video_files
-    scale_cache = {}
-    print("🔄 快取無效或不存在，需要重新計算所有比例尺")
-
-print_cache_status(scale_cache, missing_videos)
-
-# 只處理需要計算的影片對應的比例尺圖片
-new_scale_data = {}
-for root, folder, files in os.walk(scale_images_dir):
-    for file in files:
-        video_name = "-".join(file.split(sep="-")[:-1]) + ".mp4"
-        
-        # 只處理缺少快取的影片
-        if video_name not in missing_videos:
-            continue
-        
-        print(f"🔄 處理比例尺圖片: {file} (影片: {video_name})")
-        image = cv2.imread(os.path.join(root, file))
-        
-        # 從原始圖片中尋找紅色標記點
-        filtered_array = (image[..., 0] < 10) * (image[..., 1] < 10) * (image[..., 2] > 250)
-        points = np.where(filtered_array)
-        
-        # 檢查是否找到足夠的紅色標記點
-        if len(points[0]) < 2:
-            image_path = os.path.join(root, file)
-            print(f"❌ 比例尺錯誤: 在圖片 '{image_path}' 中找不到足夠的紅色標記點")
-            print(f"   對應影片: {video_name}")
-            print(f"   找到紅點數量: {len(points[0])} (需要至少 2 個)")
-            print(f"   請檢查並重新標記紅色點")
-            continue
-        
-        # 取得兩個紅點的座標 (y, x)
-        point1_original = (points[0][0], points[1][0])  # (y1, x1)
-        point2_original = (points[0][1], points[1][1])  # (y2, x2)
-        
-        # 計算原始歐氏距離（作為驗算基準）
-        original_euclidean_distance = np.sqrt(
-            (point1_original[0] - point2_original[0])**2 + 
-            (point1_original[1] - point2_original[1])**2
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="暗房標註系統（重構版）- 階段 A 設定檢視工具"
+    )
+    parser.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="列出 lifts/test_short 內的測試片段",
+    )
+    parser.add_argument(
+        "--filter",
+        nargs="+",
+        default=(),
+        help="依檔名關鍵字過濾（可多個）",
+    )
+    parser.add_argument(
+        "--show-diagnostics",
+        action="store_true",
+        help="顯示比例尺快取及暗房區間摘要",
+    )
+    parser.add_argument(
+        "--show-schema",
+        action="store_true",
+        help="印出 CSV schema 後結束",
+    )
+    parser.add_argument(
+        "--probe-video",
+        help="指定影片檔名或路徑，使用 SequentialFrameReader 進行測試",
+    )
+    parser.add_argument(
+        "--probe-count",
+        type=int,
+        default=5,
+        help="probe 模式：連續讀取的 keyframe 數量",
+    )
+    parser.add_argument(
+        "--probe-offsets",
+        type=int,
+        nargs="*",
+        default=None,
+        help="probe 模式：從最後一個 keyframe 進行 offset 尋址（單位：幀）",
+    )
+    parser.add_argument(
+        "--run-gui",
+        help="指定影片檔名或路徑，啟動 OpenCV GUI 播放器",
+    )
+    return parser.parse_args(argv)
+
+
+def format_window(window: VideoTimeWindow | None) -> str:
+    if not window:
+        return "-"
+
+    start = window.start_sec if window.start_sec is not None else 0
+    end = window.end_sec if window.end_sec is not None else float("inf")
+    start_str = f"{start:>6.1f}s"
+    end_str = "∞" if end == float("inf") else f"{end:>6.1f}s"
+    return f"{start_str} ~ {end_str}"
+
+
+def format_roi(window: VideoTimeWindow | None) -> str:
+    if not window or window.roi_ratio is None:
+        return "-"
+    return f"{window.roi_ratio:.2f}"
+
+
+def format_darkroom_info(video_name: str) -> str:
+    intervals, has = get_darkroom_intervals_for_video(video_name, darkroom_intervals)
+    if not has:
+        return "-"
+    return f"{len(intervals)} intervals"
+
+
+def format_rotation_info(video_name: str) -> str:
+    if video_name not in rotation_config:
+        return "-"
+    angle = rotation_config[video_name]
+    return f"{angle:+.1f}°"
+
+
+def format_scale_info(video_name: str, scale_config: dict[str, float]) -> str:
+    scale_value = scale_config.get(video_name)
+    if scale_value is None:
+        return "⚠ missing"
+    return f"{scale_value:.2f} px/10mm"
+
+
+def apply_filters(
+    sources: List[VideoSource], filters: Sequence[str]
+) -> List[VideoSource]:
+    if not filters:
+        return sources
+
+    lowered = [token.lower() for token in filters]
+    filtered: List[VideoSource] = []
+    for source in sources:
+        name_lower = source.path.name.lower()
+        if any(token in name_lower for token in lowered):
+            filtered.append(source)
+    return filtered
+
+
+def print_table(
+    sources: Sequence[VideoSource],
+    config: DarkroomProjectConfig,
+    scale_config: dict[str, float],
+) -> None:
+    headers = (
+        "Video File",
+        "Bucket",
+        "Base",
+        "Start ~ End (s)",
+        "ROI",
+        "Darkroom",
+        "Rotation",
+        "Scale Cache",
+    )
+    rows: List[Sequence[str]] = []
+
+    for source in sources:
+        window = config.video_windows.get(source.base_name)
+        rows.append(
+            (
+                source.path.name,
+                source.bucket,
+                source.base_name,
+                format_window(window),
+                format_roi(window),
+                format_darkroom_info(source.base_name),
+                format_rotation_info(source.base_name),
+                format_scale_info(source.base_name, scale_config),
+            )
         )
-        
-        # 複製座標用於旋轉計算
-        point1 = point1_original
-        point2 = point2_original
 
-        # 取得 base_name 用於查詢 rotation（例如 21a.mp4 -> 21.mp4）
-        base_video_name = get_base_video_name(video_name)
+    if not rows:
+        print("⚠️  沒有符合條件的影片")
+        return
 
-        # 如果影片需要旋轉，對紅點座標進行相應的旋轉變換（使用 base_name）
-        if base_video_name in rotation_config:
-            rotation_angle = rotation_config[base_video_name]
-            print(f"  🔄 旋轉比例尺座標 (角度: {rotation_angle}°)")
-            
-            # 取得圖片中心點
-            h, w = image.shape[:2]
-            center_x, center_y = w // 2, h // 2
-            
-            # 將角度轉換為弧度
-            angle_rad = np.radians(rotation_angle)
-            cos_angle = np.cos(angle_rad)
-            sin_angle = np.sin(angle_rad)
-            
-            # 對兩個點進行旋轉變換
-            def rotate_point(y, x, center_y, center_x, cos_a, sin_a):
-                # 將座標移至原點
-                rel_x = x - center_x
-                rel_y = y - center_y
-                # 進行旋轉（注意座標系統：影像 y 軸向下）
-                new_x = rel_x * cos_a + rel_y * sin_a
-                new_y = -rel_x * sin_a + rel_y * cos_a
-                # 移回原位置
-                return new_y + center_y, new_x + center_x
-            
-            point1 = rotate_point(point1[0], point1[1], center_y, center_x, cos_angle, sin_angle)
-            point2 = rotate_point(point2[0], point2[1], center_y, center_x, cos_angle, sin_angle)
-            
-            # 旋轉驗算
-            distance = abs(point1[0] - point2[0])
-            difference_ratio = abs(distance - original_euclidean_distance) / original_euclidean_distance
-            difference_percent = difference_ratio * 100
-            
-            if difference_percent > 10.0:
-                print(f"    ⚠️  旋轉驗算警告: 差異 {difference_percent:.1f}% (檔案: {file})")
+    col_widths = [
+        max(len(str(value)) for value in [header, *[row[i] for row in rows]])
+        for i, header in enumerate(headers)
+    ]
+
+    def _print_row(values: Sequence[str]) -> None:
+        line = " | ".join(str(value).ljust(col_widths[idx]) for idx, value in enumerate(values))
+        print(line)
+
+    separator = "-+-".join("-" * width for width in col_widths)
+
+    _print_row(headers)
+    print(separator)
+    for row in rows:
+        _print_row(row)
+
+
+def summarize_sources(
+    sources: Sequence[VideoSource],
+    config: DarkroomProjectConfig,
+    scale_config: dict[str, float],
+) -> None:
+    total = len(sources)
+    grouped = group_sources_by_base(sources)
+    missing_windows = [
+        base for base in grouped if base not in config.video_windows
+    ]
+    missing_scale = [
+        base for base in grouped if base not in scale_config
+    ]
+    missing_rotation = [
+        base for base in grouped if base not in rotation_config
+    ]
+
+    print("\n📊 Summary")
+    print(f"- Total video files listed : {total}")
+    print(f"- Unique base names        : {len(grouped)}")
+    print(f"- Missing time window cfg  : {len(missing_windows)}")
+    print(f"- Missing scale cache      : {len(missing_scale)}")
+    print(f"- Missing rotation override: {len(missing_rotation)}")
+
+    if missing_windows:
+        print(f"  ⚠ 未設定時間窗口：{', '.join(sorted(missing_windows))}")
+    if missing_scale:
+        print(f"  ⚠ 缺少比例尺：{', '.join(sorted(missing_scale))}")
+    if missing_rotation:
+        print(f"  ℹ 未設定旋轉角：{', '.join(sorted(missing_rotation))}")
+
+
+def resolve_video_path(config: DarkroomProjectConfig, raw_value: str) -> Path:
+    candidate = Path(raw_value)
+    if candidate.exists():
+        return candidate
+
+    fallback = config.paths.darkroom_data_dir / raw_value
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError(
+        f"找不到指定影片：{raw_value}（嘗試路徑：{candidate} / {fallback})"
+    )
+
+
+def run_probe_session(
+    video_path: Path,
+    count: int,
+    offsets: Sequence[int],
+) -> None:
+    print("\n=== SequentialFrameReader Probe ===")
+    print(f"Video     : {video_path}")
+    reader = SequentialFrameReader(video_path)
+    duration = reader.video_length / reader.fps if reader.fps else 0.0
+    print(
+        f"Frames/FPS: {reader.video_length} / {reader.fps:.3f} "
+        f"(≈ {duration:.2f}s)"
+    )
+
+    last_idx = None
+    for i in range(count):
+        frame_idx, _ = reader.read_next_keyframe()
+        if frame_idx is None:
+            print("  ⏹ 已達影片結尾")
+            break
+        last_idx = frame_idx
+        seconds = frame_idx / reader.fps if reader.fps else 0.0
+        print(f"  ▶ Keyframe #{i+1:02d} -> frame {frame_idx} ({seconds:.3f}s)")
+
+    if last_idx is not None and offsets:
+        print(f"\n  ↪ Offset lookup from base frame {last_idx}:")
+        for offset in offsets:
+            target = last_idx + offset
+            frame = reader.get_frame_at_offset(last_idx, offset)
+            if frame is None:
+                print(f"    offset {offset:+}: 超出範圍或無法讀取 ({target})")
+                continue
+            idx, _ = reader.get_current_frame()
+            seconds = (idx or 0) / reader.fps if reader.fps else 0.0
+            print(f"    offset {offset:+}: frame {idx} ({seconds:.3f}s)")
+        reader.seek_to_frame(last_idx)
+
+    reader.close()
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.show_schema:
+        SCHEMA.describe()
+        return
+
+    project_config = load_darkroom_project_config()
+    project_config.paths.ensure_base_directories()
+
+    scale_config, scale_cache_info = load_scale_cache()
+
+    print("=== 暗房標註系統：資源盤點（階段 A）===")
+    print(f"Data root : {project_config.paths.data_root}")
+    print(f"Scan step : {project_config.scan.frame_interval} frames")
+
+    sources = discover_video_sources(
+        project_config.paths, include_test_clips=args.include_tests
+    )
+
+    sources = apply_filters(sources, args.filter)
+    print_table(sources, project_config, scale_config)
+    summarize_sources(sources, project_config, scale_config)
+
+    if args.show_diagnostics:
+        print("\n=== 比例尺快取 ===")
+        if scale_cache_info:
+            print(f"版本資訊: {scale_cache_info}")
+        expected_videos = [source.base_name for source in sources]
+        missing_for_list = get_missing_videos(scale_config, expected_videos)
+        print_cache_status(scale_config, missing_for_list)
+
+        print("\n=== 暗房時間區間 ===")
+        print_darkroom_summary(darkroom_intervals)
+
+    if args.probe_video:
+        probe_offsets = args.probe_offsets if args.probe_offsets is not None else [60, -60]
+        try:
+            video_path = resolve_video_path(project_config, args.probe_video)
+        except FileNotFoundError as exc:
+            print(f"❌ {exc}")
         else:
-            # 沒有旋轉時，使用原始垂直距離
-            distance = abs(point1_original[0] - point2_original[0])
-        
-        # 最終使用的垂直方向距離
-        final_distance = abs(point1[0] - point2[0])
-        
-        print(f"  ✅ 垂直距離: {final_distance:.2f} 像素")
-        
-        if video_name in new_scale_data:
-            new_scale_data[video_name].append(final_distance)
-        else:
-            new_scale_data[video_name] = [final_distance]
+            run_probe_session(video_path, max(1, args.probe_count), probe_offsets)
 
-# 計算平均值並更新快取
-for video_name, distances in new_scale_data.items():
-    scale_cache[video_name] = np.mean(distances)
-    print(f"📊 {video_name}: 平均比例尺 {scale_cache[video_name]:.4f} 像素")
+    if args.run_gui:
+        try:
+            video_path = resolve_video_path(project_config, args.run_gui)
+        except FileNotFoundError as exc:
+            print(f"❌ {exc}")
+            return
+        base_name = get_base_video_name(video_path.name)
+        scale_factor = scale_config.get(base_name)
+        player = OpenCVGUIPlayer(str(video_path), scale_factor=scale_factor)
+        player.run()
 
-# 儲存更新的快取
-if new_scale_data:
-    cache_info = {
-        'last_updated': datetime.datetime.now().isoformat(),
-        'total_videos': len(scale_cache),
-        'directory_hash': generate_scale_images_hash(scale_images_dir),
-        'newly_processed': len(new_scale_data)
-    }
-    save_scale_cache(scale_cache, cache_info)
 
-# 設定最終的比例尺字典供主程式使用
-video_scale_dict = scale_cache
-
-print(f"\n📊 比例尺處理完成，共處理 {len(video_scale_dict)} 個影片的比例尺資料:")
-for video, scale in video_scale_dict.items():
-    print(f"  {video}: {scale:.2f} 像素")
-
-print(f"\n🎬 開始處理暗房影片...")
-
-# 測試模式：只處理 21_a.mp4
-import os
-LIFT_TARGET = os.environ.get('LIFT_TARGET', None)
-
-if LIFT_TARGET:
-    # 只處理指定影片
-    target_path = os.path.join(DATA_FOLDER, 'lifts', 'darkroom_data', LIFT_TARGET)
-    if os.path.exists(target_path):
-        print(f"\n🎯 測試模式：只處理 {LIFT_TARGET}")
-        scan(target_path, LIFT_TARGET)
-        print(f"✅ 影片處理完成: {LIFT_TARGET}")
-    else:
-        print(f"❌ 找不到指定影片: {target_path}")
-else:
-    # 處理所有影片
-    for root, folder, files in os.walk(os.path.join(DATA_FOLDER, 'lifts', 'darkroom_data')):
-        for file in files:
-            if file.endswith('.mp4'):
-                print(f"\n🎥 正在處理暗房影片: {file}")
-                scan(os.path.join(root, file), file)
-                print(f"✅ 影片處理完成: {file}")
-
-print(f"\n🎉 所有暗房影片處理完成！")
+if __name__ == "__main__":
+    main()
 

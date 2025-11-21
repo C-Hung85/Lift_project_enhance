@@ -42,6 +42,7 @@
 - 🆕 **時間軸導航控制**（前進/後退/暫停/變速）
 - 🆕 **Cluster 標記工作流**（起始幀 → 結束幀 → 線段標記）
 - 🆕 **三次線段標記取平均**（像素位移 → mm 轉換）
+- 🆕 **雙套 ROI 系統**（播放 ROI 放大 + 測量 ROI 重新繪製）
 - 🆕 **等速分配演算法**（位移平均分配至關鍵幀）
 - 🆕 **增量式 CSV 寫入**（即時儲存，支援中斷繼續）
 - 🆕 **自動方向判定**（根據線段標記計算，提示使用者確認）
@@ -98,6 +99,13 @@ lift_travel_detection_dark.py (重構後)
 │   ├─ 滑鼠回調：節流更新頻率防止崩潰（兩個回調：雙畫布、控制面板）
 │   ├─ 輔助線系統：可調整的水平參考線（黃色，橫跨整個視窗）
 │   └─ 狀態顯示：直接繪製文字於影像上
+│
+├─ [新增] ROI 管理模組 (ROIManager)
+│   ├─ 管理播放用 ROI（Zoom Preview），隨時套用/清除放大視窗
+│   ├─ 進入線段標記前自動回復全幅並要求使用者重新繪製測量 ROI
+│   ├─ 儲存最近一次測量 ROI，供播放模式快速套用
+│   ├─ 統一放大渲染（左右畫布、輔助線、控制面板提示）
+│   └─ 封裝 ROI 快捷鍵與提示邏輯，提供 GUI/Workflow/Marker 共用
 │
 ├─ [新增] Cluster 標記工作流 (ClusterMarkingWorkflow)
 │   ├─ mark_cluster_start() → cluster_id
@@ -540,6 +548,12 @@ class OpenCVGUIPlayer:
 3. ✅ **快速響應**：鍵盤快捷鍵即時反應
 4. ✅ **防崩潰**：滑鼠回調節流（50ms），避免過度更新
 5. ✅ **直覺操作**：滑鼠點擊區域模擬按鈕
+
+#### 播放 ROI 與測量 ROI 模式
+- **播放 ROI (Zoom Preview)**：播放或暫停時可按 `R`（或控制面板按鈕）拖曳 ROI，左右畫布即套用放大顯示；可隨時覆寫、清除 (`Shift+R`)，輔助線等疊圖自動對齊放大畫面。
+- **Dual Canvas 內建選取**：ROI 直接在雙畫布上拖曳完成，GUI 不中斷（不再彈出 `cv2.selectROI()` 視窗），並透過 ROIManager 狀態機管理選取/取消流程。
+- **測量 ROI**：進入線段標記前由 ROIManager 強制回復全幅並要求重新繪製測量專用 ROI；該 ROI 僅用於三次量測流程，結束後可選擇套用回播放模式。
+- **狀態同步**：ROIManager 統一儲存播放/測量 ROI，GUI、Cluster 工作流、LineSegmentMarker 透過事件通知保持一致；模式切換時自動決定清除或復原先前的放大設定。
 
 **快捷鍵列表：**
 - **Space**：播放/暫停
@@ -998,7 +1012,7 @@ class OpenCVGUIPlayer:
 **工作流程：**
 
 ```
-1. [瀏覽模式] 使用者前後導航，尋找運動事件
+1. [瀏覽模式] 使用者前後導航，必要時啟用播放 ROI 放大以聚焦疑似區域
    ↓
 2. [標記起始] 按下「標記 Cluster 起始」
    - 生成 cluster_id = physical_cluster_counter + 1
@@ -1014,8 +1028,10 @@ class OpenCVGUIPlayer:
 4. [標記結束] 按下「確認 Cluster 結束」
    - 記錄 cluster_end_idx (右畫布當前幀)
    - 匯出 post_cluster_XXX.jpg (右畫布)
+   - 若播放 ROI 正在啟用，ROIManager 提示「測量前需回到全幅」並自動清除放大
    ↓
 5. [線段標記] 自動進入線段標記模式
+   - 步驟 5.0：回到全幅畫面，重新繪製測量專用 ROI（播放 ROI 不可沿用）
    - 步驟 5.1：選擇 ROI 區域（在左畫布拖曳，同步顯示在右畫布）
    - 步驟 5.2：3x 放大顯示 ROI（左右並排）
    - 步驟 5.3：標記 3 次，每次分別在左右畫布標記線段
@@ -1228,6 +1244,8 @@ class LineSegmentMarker:
         )
         return result
 ```
+
+**ROI 流程備註**：LineSegmentMarker 啟動前由 ROIManager 保證畫面已回復全幅，播放 ROI 若存在會被暫存並關閉。測量結束後，使用者可選擇「套用到播放 ROI」，以便在後續瀏覽階段延續相同放大區域。
 
 **標記流程視覺化（更新為 3x 放大與並排顯示）：**
 
@@ -1700,6 +1718,7 @@ class OpenCVGUIPlayer:
 
 5. 使用者瀏覽影片
    → 按下 [播放 ▶]，系統以 150ms/幀播放
+   → 需要聚焦時按下 [ROI] 按鈕或 `R` 鍵，框選播放 ROI（左右畫布同步放大）
    → 發現疑似運動事件，按下 [暫停 ⏸]
    → 微調：[◀ -6] [◀ -6] 回退 12 幀（順序讀取）
 
@@ -1718,15 +1737,16 @@ class OpenCVGUIPlayer:
 8. 確認 Cluster 結束
    → 按下 [確認 Cluster 結束]
    → 系統：post_cluster_003.jpg 已匯出
+   → 若播放 ROI 正啟用，ROIManager 提示「測量前將回到全幅」，並自動清除放大
    → 系統：進入線段標記模式
 
 9. 線段標記（第 1/3 次）
-   → 系統提示：請在左畫布標記參考線段
-   → 使用者點選 ROI → 8x 放大 → 標記線段
+   → 系統提示：請回到全幅並重新選擇測量用 ROI
+   → 完成後顯示 3x 放大 ROI，請在左畫布標記參考線段
    → 確認對話框：[確認] [清除重繪]
    → 使用者確認
    → 系統提示：請在右畫布標記對應線段
-   → 使用者點選 ROI → 8x 放大 → 標記對應線段
+   → 使用者在右畫布同樣於放大 ROI 內標記線段
    → 確認對話框：[確認] [清除重繪]
    → 使用者確認
    → 系統：第 1 次測量完成，位移 = -28.5 px
@@ -1738,7 +1758,8 @@ class OpenCVGUIPlayer:
 
 11. 自動方向判定
     → 像素轉 mm：|-28.5| × 10 / 45.2 = 6.3 mm
-    → 方向判定：dy < 0 → UP (orientation = 1)
+    → 方向判定：post 線段 Y 分量 - pre 線段 Y 分量 = Δy；Δy > 0 → UP (正值)、Δy < 0 → DOWN (負值)
+    → GUI 會顯示確認對話框，使用者可修正方向
     → 關鍵幀：1686, 1692, 1698, ..., 1794 (共 19 幀)
     → 每幀分配：6.3 / 19 = 0.332 mm
 
@@ -1767,89 +1788,82 @@ class OpenCVGUIPlayer:
 
 ---
 
-## 6. 實作階段規劃
+## 6. 分階段執行計畫與 Checklists
 
-### 階段 1：核心基礎重構（1-2 天）
-- [ ] 備份現有程式碼
-- [ ] 移除自動偵測相關程式碼
-- [ ] 保留比例尺快取系統
-- [ ] 保留影片旋轉與前處理
-- [ ] 保留 JPG 匯出功能
-- [ ] 調整 CSV 輸出結構
-- [ ] 停用 inspection 影片生成
+> 說明：以下章節依照實作順序排列。每個階段列出目標、交付物與詳細 checklist，可視情況並行，但建議遵守依賴順序，確保 ROI/GUI/CSV 等模組可漸進整合。
 
-### 階段 2：逐幀讀取器實作（2-3 天）
-- [ ] 實作 `SequentialFrameReader` 類別
-- [ ] 實作幀快取機制
-- [ ] 實作 `seek_to_frame()` 順序讀取
-- [ ] 實作 `get_frame_at_offset()` 偏移讀取
-- [ ] 實作向後導航（重新開啟影片）
-- [ ] 測試幀讀取準確性（與實際幀索引比對）
+### 階段 A：基礎重構與資源準備（Day 0-1）
+**目標**：清理既有自動偵測程式，保留可重用模組，建立可控的重構基線。
+- [x] 備份現有程式碼
+- [x] 移除 ORB/狀態機/inspection 影片等自動偵測流程
+- [x] 保留並驗證 `scale_cache_utils`、`rotation_utils`、`darkroom_utils`
+- [x] 重新整理設定檔（Config、video_config、rotation_config）縮減為必要欄位
+- [x] 調整 CSV schema，定義新欄位（orientation、marking_status 等）
+- [x] 建立最小可執行主程式骨架，僅載入設定與列出可處理影片
 
-### 階段 3：OpenCV GUI 播放器基礎（3-4 天）
-- [ ] OpenCV 視窗建立與配置（三視窗：左畫布、右畫布、控制面板）
-- [ ] 整合 `SequentialFrameReader`
-- [ ] 滑鼠回調節流機制實作（防崩潰）
-- [ ] 按鈕繪製與點擊區域檢測
-- [ ] 播放控制邏輯（播放/暫停/反向/變速）
-- [ ] 微調導航功能（±6/±30/±300，順序讀取）
-- [ ] 快捷鍵系統實作（Space, S, Z, C, H, Q, 方向鍵等）
-- [ ] 輔助線系統實作（GuideLineSystem 類別）
-- [ ] 可自訂右畫布對照間隔
-- [ ] CLAHE 開關功能
-- [ ] 狀態文字直接繪製於影像上
+### 階段 B：逐幀讀取器（Day 1-3）
+**目標**：確保所有導航以順序讀取實作，解決 OpenCV seek 誤差。
+- [x] 實作 `SequentialFrameReader` 類別與初始化/釋放資源流程
+- [x] 完成 forward/backward 雙向快取與容量維護策略
+- [x] 實作 `read_next_keyframe()`、`seek_to_frame()`、`get_frame_at_offset()`
+- [x] 支援向後導航時自動重新開啟影片與進度重播
+- [ ] 撰寫基礎測試（比較 frame_idx 與實際時間戳）
+- [x] 暫時 CLI 介面：輸入 frame offset 並輸出驗證資訊
 
-### 階段 4：Cluster 標記工作流（2-3 天）
-- [ ] 標記起始/結束按鈕邏輯
-- [ ] 畫布鎖定/解鎖機制
-- [ ] 右畫布獨立導航
-- [ ] JPG 匯出整合
-- [ ] Cluster ID 管理
-- [ ] 狀態機實作（瀏覽/標記起始/標記結束/線段標記）
+### 階段 C：GUI 播放核心 + 播放 ROI（Day 3-6）
+**目標**：建立 OpenCV 雙畫布與控制面板，整合播放 ROI（Zoom Preview）。
+- [x] 建立 `OpenCVGUIPlayer` 視窗（Dual Canvas + Control Panel）
+- [x] 接上 SequentialFrameReader 進行播放、暫停、加/減速
+- [x] 實作滑鼠回調節流、按鈕命中檢測、文字繪製
+- [x] 加入快捷鍵（Space、S、Z、C、Q、H、G、R、Shift+R）
+- [x] 實作 GuideLineSystem 並與 GUI 同步顯示
+- [x] 建立 `ROIManager` 播放 ROI 流程：選擇、放大、清除、狀態提示
+- [x] 確認播放 ROI 可同步左右畫布與輔助線
+- [ ] 提供至少一個 demo（播放 + ROI 切換）影片截圖或錄影
 
-### 階段 5：線段標記整合（3-4 天）
-- [ ] 參考 `manual_correction_tool.py` 改寫
-- [ ] ROI 選擇功能
-- [ ] 8x 放大顯示
-- [ ] 線段標記（點選兩端點）
-- [ ] 確認對話框（清除重繪功能）
-- [ ] 三次測量取平均
-- [ ] 像素轉 mm 計算
-- [ ] 標準差警告
+### 階段 D：Cluster 標記工作流（Day 6-8）
+**目標**：完成標記起始/結束、畫布鎖定與 JPG 匯出整合。
+- [x] 在 GUI Player 中加入標記起始/結束按鈕與 cluster 狀態機
+- [x] 實作左畫布鎖定與右畫布獨立導航邏輯
+- [x] 匯出 pre/post JPG 並掛入 `export_frame_jpg`
+- [x] 管理 cluster_id（自動遞增、顯示於 GUI）
+- [x] 進入線段標記模式前，透過 ROIManager 強制清除播放 ROI
+- [x] 撰寫 cluster workflow log（Console/GUI）以利除錯
 
-### 階段 6：自動方向判定與確認（1-2 天）
-- [ ] 自動計算 orientation
-- [ ] 確認對話框設計
-- [ ] 顯示計算結果（總位移、方向、平均）
-- [ ] 取消並重新標記功能
+### 階段 E：線段標記與測量 ROI（Day 8-11）
+**目標**：導入 LineSegmentMarker，完成測量專用 ROI + 放大視圖 + 三次量測。
+- [x] 將 `manual_correction_tool.py` 關鍵邏輯抽成 `LineSegmentMarker`
+- [x] 在進入標記模式時觸發「回到全幅→重新繪製測量 ROI」流程
+- [x] 實作 3x 放大並排顯示、左右畫布同步 ROI
+- [x] 完成線段雙點標記、確認對話框、清除重繪
+- [x] 記錄三次量測與標準差提示，並允許重新量測
+- [x] 測量結束後可選擇「套用 ROI 至播放模式」以回傳 ROIManager
 
-### 階段 7：等速分配與 CSV 寫入（2-3 天）
-- [ ] 等速分配演算法實作
-- [ ] `IncrementalCSVWriter` 類別
-- [ ] 進度載入功能（取得上次位置）
-- [ ] 順序讀取至上次位置
-- [ ] append_cluster() 實作
-- [ ] delete_cluster() 實作
-- [ ] 即時儲存機制
+### 階段 F：方向判定、等速分配與增量 CSV（Day 11-14）
+**目標**：將量測結果轉換成 mm，計算 orientation，分配至關鍵幀並即時寫入。
+- [x] 依 scale cache 計算 mm 位移與方向（Δy > 0 → DOWN 等）
+- [x] 實作 `distribute_displacement_uniformly`（排除起終參考幀）
+- [x] 建立 `IncrementalCSVWriter`（載入、append、delete、即時儲存）
+- [x] 支援從 CSV 回復進度（跳至最後處理幀）
+- [x] 將 cluster data（pre/post、運動幀、orientation）寫入 CSV
+- [x] 於 GUI 按鍵流程中呼叫 CSV writer，顯示儲存成功/失敗訊息
 
-### 階段 8：錯誤處理與刪除功能（1-2 天）
-- [ ] 刪除 Cluster 按鈕
-- [ ] 刪除 CSV 記錄
-- [ ] 刪除對應 JPG 檔案
-- [ ] 錯誤訊息與確認對話框
+### 階段 G：Cluster 管理與錯誤處理（Day 14-16）
+**目標**：提供完整刪除/復原流程，確保 CSV 與 JPG 資料一致。
+- [x] 實作 `ClusterManager`（查詢 CSV → 刪 JPG → 刪記錄）
+- [x] 在 GUI 中加入 delete cluster 按鈕與確認對話框
+- [x] 提供 Undo/Redo 記錄（至少上一個動作）
+- [x] 加入錯誤處理：檔案不存在、寫入失敗、ROI 狀態不一致
+- [ ] 撰寫 log（檔案或 console）供日後除錯
 
-### 階段 9：測試與優化（2-3 天）
-- [ ] 完整工作流測試
-- [ ] 逐幀讀取準確性驗證
-- [ ] 效能優化（快取策略、GUI 響應）
-- [ ] 錯誤處理完善
-- [ ] 使用者提示與說明
-
-### 階段 10：文件與發布（1 天）
-- [ ] 使用說明文件
-- [ ] 快捷鍵列表
-- [ ] 常見問題 FAQ
-- [ ] 範例影片與結果
+### 階段 H：整體測試、優化與文件（Day 16-19）
+**目標**：驗證完整工作流、優化效能並準備對外文件。
+- [ ] 完成端到端測試（讀影片→播放 ROI→標記→量測→CSV）
+- [ ] 驗證順序讀取正確性（抽樣比對 frame_idx / timestamp）
+- [ ] 使用多支影片測試旋轉、暗房區間與 ROI 交互
+- [ ] 優化快取、播放延遲與 GUI 響應
+- [ ] 更新使用手冊、快捷鍵表、FAQ、錄製示範影片
+- [ ] 準備部署/交付清單（必要的檔案與設定）
 
 **預計總時程：18-27 天**
 
@@ -1997,6 +2011,10 @@ class OpenCVGUIPlayer:
 - `FORWARD_CACHE_SIZE = 400`：未來幀快取大小（20%）
 - `TOTAL_CACHE_MEMORY = 12 GB`：總快取記憶體（2000 關鍵幀）
 - `ROI_ZOOM_FACTOR = 8`：線段標記放大倍率
+- `PLAYBACK_ROI_ZOOM_FACTOR = 2`：播放 ROI 預設放大倍率
+- `PLAYBACK_ROI_MIN_SIZE = (240, 240)`：播放 ROI 最小尺寸
+- `MEASUREMENT_ROI_RESET_REQUIRED = True`：進入測量前必須重新繪製 ROI
+- `PLAYBACK_ROI_SHORTCUT = 'R'`：播放 ROI 開啟快捷鍵
 - `STD_WARNING_THRESHOLD = 2.0`：標準差警告閾值（像素）
 - `MOUSE_THROTTLE_MS = 50`：滑鼠回調節流間隔（ms）
 - `GUIDE_LINE_COLOR = (0, 255, 255)`：輔助線顏色（黃色 BGR）
@@ -2024,6 +2042,14 @@ CSV_COLUMNS = [
 ---
 
 ## 11. 變更記錄
+
+### v3.7 (2025-11-21)
+- ✅ **新增**：雙套 ROI 系統（播放 ROI + 測量 ROI）寫入設計
+  - 播放 ROI 可在瀏覽期間放大、清除並同步左右畫布
+  - 測量 ROI 需於進入線段標記前重新繪製，避免沿用播放視窗
+- ✅ **新增**：ROIManager 模組描述與 GUI 整合細節
+- ✅ **更新**：Cluster 工作流、使用者工作流示例及線段標記章節，加入 ROI 切換流程
+- ✅ **補充**：關鍵參數新增播放 ROI 相關常數、快捷鍵
 
 ### v3.6 (2025-11-11)
 - ✅ **重大修正**：線段標記測量方式改為「Y 分量差」

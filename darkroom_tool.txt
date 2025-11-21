@@ -1,0 +1,38 @@
+啟動方式
+
+建議使用 uv（或已啟用的 Python venv）進入專案根目錄 D:\Lift_project。
+執行下列指令啟動暗房標註 GUI，並指定影片路徑（使用暗房資料夾內的檔案）：
+   uv run python src\lift_travel_detection_dark.py --run-gui lifts\darkroom_data\31-1_a.mp4
+若影片已有比例尺快取 (scale_config)，GUI 會自動載入 px/10mm 值，完成 cluster 後即可寫入 mm 位移。
+若存在既有 CSV (lifts/result/<video>_dark.csv)，程式會自動 seek 到最後處理幀以便續作。
+
+
+操作流程概覽
+
+播放與瀏覽
+
+左/右畫布為同步關鍵幀（右畫布預設 +60 幀，可透過控制面板快速跳躍）。
+Space 播放/暫停，C 切換 CLAHE，G/H 控制輔助線，控制面板提供 ±6/±30/±300 幀的跳躍按鈕。
+播放 ROI
+按 [Set ROI]（或 R）後可直接在左畫布拖曳矩形選取放大區域，再 Shift+R 或 [Clear ROI] 清除。
+測量前會強制回到全幅，避免播放 ROI 影響量測流程。
+
+Cluster 標記
+[Mark Start]（或 Enter）鎖定左畫布為 cluster 起點並匯出 pre JPG。
+查看右畫布，利用控制按鈕/快捷鍵定位到結束幀，再按 [Mark End]（或 Enter：第二次）匯出 post JPG。
+期間可用 [Cancel Cluster] / D 中止，會刪除 pre JPG。
+
+測量與方向判定
+完成 cluster 後會自動進入測量模式：重新框測量用 ROI → 左右畫布各標記線段 3 次。
+計算平均 Δy 後自動判定方向（Δy>0=UP，Δy<0=DOWN），等速分配位移並寫入 lifts/result/<video>_dark.csv。
+
+測量結束會詢問是否沿用該 ROI 做為播放放大區域，依需求選擇。
+
+刪除與 Undo
+[Delete Last] / X 會刪除最近完成的 cluster（同時移除 CSV 與 pre/post JPG）。
+[Undo Delete] / U 可復原上一筆刪除（含 JPG 與 CSV 行）。
+
+持續作業
+每個 cluster 寫入後會記錄最新 cluster_id，方便後續刪除或續作。
+退出（Q）或中途結束後再啟動同一影片，會自動從 CSV 的最後幀續作。
+如需更多流程細節可參考 docs/lift_detection_dark_refactor_plan.md，內含完整設計與快捷鍵表。
